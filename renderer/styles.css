@@ -259,7 +259,12 @@ input { font-family: inherit; color: inherit; }
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.page-thumb canvas { display: block; width: 100%; height: auto; }
+.page-thumb canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* explicit aspect-ratio set inline by JS to keep proportions while bitmap loads */
+}
 .page-thumb:hover {
   border-color: var(--glass-border-strong);
   transform: translateY(-1px);
@@ -331,18 +336,51 @@ input { font-family: inherit; color: inherit; }
 #pdfCanvas { display: block; background: #fff; }
 .text-overlay {
   position: absolute; inset: 0; pointer-events: none;
+  z-index: 3;
 }
 .text-overlay .placed-text {
   position: absolute;
   white-space: pre;
   pointer-events: auto;
-  cursor: pointer;
-  transition: outline-color 0.15s var(--ease);
+  cursor: grab;
+  user-select: none;
+  transition: outline-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
   outline: 1px dashed transparent;
-  outline-offset: 2px;
+  outline-offset: 3px;
+  line-height: 1;
 }
-.text-overlay .placed-text:hover {
-  outline-color: var(--accent);
+.text-overlay .placed-text:hover { outline-color: var(--accent); }
+.text-overlay .placed-text.dragging {
+  cursor: grabbing;
+  outline-color: var(--accent2);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+.text-overlay .placed-text-del {
+  position: absolute;
+  top: -9px; right: -9px;
+  width: 18px; height: 18px;
+  display: grid; place-items: center;
+  background: #e81123; color: #fff;
+  border: 1px solid rgba(255,255,255,0.4);
+  border-radius: 50%;
+  font-size: 11px; line-height: 1;
+  cursor: pointer;
+  opacity: 0; transform: scale(0.7);
+  transition: opacity 0.15s var(--ease), transform 0.15s var(--ease);
+}
+.text-overlay .placed-text:hover .placed-text-del,
+.text-overlay .placed-text.dragging .placed-text-del { opacity: 1; transform: scale(1); }
+.text-overlay .placed-text-badge {
+  position: absolute;
+  top: -8px; left: -8px;
+  width: 16px; height: 16px;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  border-radius: 50%;
+  font-size: 9px; line-height: 1;
+  pointer-events: none;
+  box-shadow: 0 2px 6px rgba(167,139,250,0.5);
 }
 
 .page-nav {
@@ -588,6 +626,135 @@ input { font-family: inherit; color: inherit; }
   transition: background 0.15s ease;
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* ===== Grid reorder view ===== */
+.canvas-wrap { position: relative; }
+.canvas-wrap .canvas-stage { display: block; }
+.canvas-wrap .grid-view { display: none; }
+.canvas-wrap.grid-mode { padding: 24px; align-items: flex-start; }
+.canvas-wrap.grid-mode .canvas-stage { display: none; }
+.canvas-wrap.grid-mode .grid-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 18px;
+  width: 100%;
+  align-content: start;
+}
+.grid-item {
+  position: relative;
+  background: rgba(0,0,0,0.3);
+  border: 2px solid transparent;
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: grab;
+  transition: transform 0.18s var(--ease), border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+  animation: thumbIn 0.3s var(--ease) both;
+}
+.grid-item:hover {
+  border-color: var(--glass-border-strong);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(0,0,0,0.4);
+}
+.grid-item.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(167,139,250,0.18);
+}
+.grid-item.dragging { opacity: 0.4; cursor: grabbing; }
+.grid-item.drop-before { box-shadow: -4px 0 0 0 var(--accent), 0 0 0 3px rgba(167,139,250,0.18); }
+.grid-item.drop-after  { box-shadow:  4px 0 0 0 var(--accent), 0 0 0 3px rgba(167,139,250,0.18); }
+.grid-item canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #fff;
+}
+.grid-item-num {
+  position: absolute; top: 8px; left: 8px;
+  background: rgba(0,0,0,0.8);
+  color: #fff;
+  font-size: 11px; font-weight: 600;
+  padding: 3px 8px; border-radius: 6px;
+}
+.grid-item-del {
+  position: absolute; top: 8px; right: 8px;
+  width: 24px; height: 24px;
+  display: grid; place-items: center;
+  background: rgba(0,0,0,0.75);
+  color: #fff;
+  border-radius: 50%;
+  font-size: 14px; line-height: 1;
+  cursor: pointer;
+  opacity: 0; transform: scale(0.85);
+  transition: opacity 0.15s var(--ease), transform 0.15s var(--ease), background 0.15s var(--ease);
+}
+.grid-item:hover .grid-item-del { opacity: 1; transform: scale(1); }
+.grid-item-del:hover { background: #e81123; }
+
+/* Reorder button "active" look */
+.btn.toggled {
+  background: linear-gradient(135deg, rgba(167,139,250,0.35), rgba(236,72,153,0.35));
+  border-color: rgba(167,139,250,0.5);
+  color: #fff;
+}
+
+/* ===== Text layer (selectable text over canvas) ===== */
+.text-layer {
+  position: absolute; inset: 0;
+  overflow: hidden;
+  opacity: 0.2;
+  line-height: 1;
+  pointer-events: auto;
+  z-index: 2;
+  forced-color-adjust: none;
+}
+.text-layer span,
+.text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+.text-layer ::selection {
+  background: rgba(167,139,250,0.5);
+}
+.text-layer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0 0;
+  z-index: -1;
+  cursor: default;
+  user-select: none;
+}
+.text-layer .endOfContent.active {
+  top: 0;
+}
+
+/* ===== Form check ===== */
+.form-check {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 4px 0;
+}
+.form-check input[type="checkbox"] {
+  width: 16px; height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.form-check span { user-select: none; }
+
+/* ===== Bookmark anchor indicator ===== */
+.bookmark-item .bm-anchor {
+  display: inline-grid; place-items: center;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent3));
+  color: #fff;
+  font-size: 9px;
+  margin-right: 6px;
+}
 
 /* ===== Responsive ===== */
 @media (max-width: 1100px) {

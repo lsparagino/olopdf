@@ -5,12 +5,10 @@ const path = require('path');
 const fs = require('fs');
 const { ipcRenderer } = require('electron');
 
-// pdf.js (legacy CJS build) + pdf-lib
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
-const { PDFDocument, StandardFonts, rgb, PDFName, PDFString, PDFArray, PDFRef, PDFNumber } = require('pdf-lib');
+const { PDFDocument, StandardFonts, rgb, PDFName, PDFString, PDFArray, PDFNumber } = require('pdf-lib');
 
-// Configure pdf.js worker by loading the worker script as a Blob URL.
-// This works both in development and in the packaged asar.
+// pdf.js worker — load worker as a Blob URL so it works in dev and packaged asar
 (function setupWorker() {
   try {
     const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.js');
@@ -26,20 +24,23 @@ const { PDFDocument, StandardFonts, rgb, PDFName, PDFString, PDFArray, PDFRef, P
 // State
 // ============================================================
 const state = {
-  filePath: null,           // string | null
-  pdfBytes: null,           // ArrayBuffer of original
-  pdfjsDoc: null,           // pdfjs document
-  pageOrder: [],            // array of original page indices (0-based)
-  bookmarks: [],            // [{ title, pageOriginalIdx }]
-  textAnnotations: [],      // [{ pageOriginalIdx, x, y, text, size, color }]
-  currentPage: 0,           // index into pageOrder
+  filePath: null,
+  pdfBytes: null,
+  pdfjsDoc: null,
+  pageOrder: [],
+  bookmarks: [],          // [{ title, pageOriginalIdx, x?, y? }]   x,y in PDF user-space, top-left origin
+  textAnnotations: [],    // per-page: [{ pageOriginalIdx, x, y, text, size, color }]
+  repeatTexts: [],        // applied to every page: [{ x, y, text, size, color }]
+  currentPage: 0,
   zoom: 1.0,
-  fitMode: false,           // when true, recompute zoom to fit container
-  thumbCache: new Map(),    // originalPageIdx -> dataURL
+  fitMode: true,
+  thumbCache: new Map(),
   renderTask: null,
-  pendingTextPlacement: null, // {text,size,color} | null
-  // merge mode
-  mergeFiles: [],           // [{ name, bytes }]
+  textLayerTask: null,
+  pendingTextPlacement: null,   // { text, size, color, repeat }
+  capturedSelection: null,      // { text, x, y, pageOriginalIdx } | null
+  gridMode: false,
+  mergeFiles: []
 };
 
 // ============================================================
@@ -85,7 +86,7 @@ $('winMax').addEventListener('click', () => ipcRenderer.send('win:max'));
 $('winClose').addEventListener('click', () => ipcRenderer.send('win:close'));
 
 // ============================================================
-// Welcome screen
+// Welcome
 // ============================================================
 $('openBtn').addEventListener('click', pickAndOpenPdf);
 $('mergeBtn').addEventListener('click', () => {
@@ -94,21 +95,17 @@ $('mergeBtn').addEventListener('click', () => {
   showScreen('merge');
 });
 $('mergeBackBtn').addEventListener('click', () => showScreen('welcome'));
-$('backBtn').addEventListener('click', () => showScreen('welcome'));
+$('backBtn').addEventListener('click', () => {
+  if (state.gridMode) toggleGridMode(false);
+  showScreen('welcome');
+});
 
-// Drop on welcome card
 const dropZone = $('dropZone');
 ['dragenter', 'dragover'].forEach(ev =>
-  dropZone.addEventListener(ev, (e) => {
-    e.preventDefault();
-    dropZone.classList.add('dragover');
-  })
+  dropZone.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.add('dragover'); })
 );
 ['dragleave', 'drop'].forEach(ev =>
-  dropZone.addEventListener(ev, (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-  })
+  dropZone.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); })
 );
 dropZone.addEventListener('drop', async (e) => {
   e.preventDefault();
@@ -120,14 +117,16 @@ dropZone.addEventListener('drop', async (e) => {
     state.mergeFiles = [];
     for (const f of files) {
       const bytes = await fs.promises.readFile(f.path);
-      state.mergeFiles.push({ name: f.name, bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+      state.mergeFiles.push({
+        name: f.name,
+        bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      });
     }
     renderMergeList();
     showScreen('merge');
   }
 });
 
-// Prevent default file drops on the entire window
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => e.preventDefault());
 
@@ -159,7 +158,6 @@ async function openPdfFromPath(filePath) {
 }
 
 async function loadPdfBytes(arrayBuffer, filePath) {
-  // pdfjs needs a copy because it transfers the buffer
   const pdfjsCopy = arrayBuffer.slice(0);
   state.pdfBytes = arrayBuffer;
   state.filePath = filePath;
@@ -167,10 +165,13 @@ async function loadPdfBytes(arrayBuffer, filePath) {
   state.pageOrder = Array.from({ length: state.pdfjsDoc.numPages }, (_, i) => i);
   state.bookmarks = [];
   state.textAnnotations = [];
+  state.repeatTexts = [];
   state.currentPage = 0;
   state.zoom = 1.0;
   state.fitMode = true;
   state.thumbCache.clear();
+  state.gridMode = false;
+  toggleGridMode(false);
 
   $('filename').textContent = filePath ? path.basename(filePath) : 'untitled.pdf';
   $('totalPages').textContent = state.pageOrder.length;
@@ -181,7 +182,7 @@ async function loadPdfBytes(arrayBuffer, filePath) {
 }
 
 // ============================================================
-// Rendering
+// Page render + text layer
 // ============================================================
 async function renderCurrentPage() {
   if (!state.pdfjsDoc || state.pageOrder.length === 0) return;
@@ -191,7 +192,6 @@ async function renderCurrentPage() {
   const origIdx = state.pageOrder[state.currentPage];
   const page = await state.pdfjsDoc.getPage(origIdx + 1);
 
-  // Compute scale
   const wrap = $('canvasWrap');
   const baseViewport = page.getViewport({ scale: 1 });
   let scale = state.zoom;
@@ -229,37 +229,130 @@ async function renderCurrentPage() {
   $('curPage').textContent = state.currentPage + 1;
   $('zoomLabel').textContent = Math.round(state.zoom * 100) + '%';
 
+  // Render text layer (selectable text) and overlay annotations
+  await renderTextLayer(page, viewport);
   drawTextOverlays(viewport, scale);
   highlightActiveThumb();
 }
 
+async function renderTextLayer(page, viewport) {
+  const layer = $('textLayer');
+  layer.innerHTML = '';
+  layer.style.width = viewport.width + 'px';
+  layer.style.height = viewport.height + 'px';
+  if (state.textLayerTask) {
+    try { state.textLayerTask.cancel(); } catch (_) {}
+  }
+  try {
+    const textContent = await page.getTextContent();
+    const task = pdfjsLib.renderTextLayer({
+      textContent,
+      textContentSource: textContent,
+      container: layer,
+      viewport,
+      textDivs: []
+    });
+    state.textLayerTask = task;
+    if (task && task.promise) await task.promise;
+  } catch (e) {
+    console.warn('Text layer render failed', e);
+  }
+  state.textLayerTask = null;
+}
+
+// ============================================================
+// Text overlay (placed annotations) — draggable
+// ============================================================
 function drawTextOverlays(viewport, scale) {
   const overlay = $('textOverlay');
   overlay.innerHTML = '';
   const origIdx = state.pageOrder[state.currentPage];
-  const items = state.textAnnotations.filter(a => a.pageOriginalIdx === origIdx);
-  for (const a of items) {
-    const el = document.createElement('div');
-    el.className = 'placed-text';
-    el.textContent = a.text;
-    el.style.left = (a.x * scale) + 'px';
-    // a.y is from top-left in PDF user units (after our conversion below).
-    el.style.top = (a.y * scale) + 'px';
-    el.style.fontSize = (a.size * scale) + 'px';
-    el.style.color = a.color;
-    el.style.lineHeight = '1';
-    el.title = 'Click to remove';
-    el.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const idx = state.textAnnotations.indexOf(a);
-      if (idx >= 0) state.textAnnotations.splice(idx, 1);
-      renderCurrentPage();
-      toast('Text removed');
-    });
-    overlay.appendChild(el);
+  const perPage = state.textAnnotations
+    .filter(a => a.pageOriginalIdx === origIdx)
+    .map(a => ({ ann: a, repeat: false }));
+  const repeats = state.repeatTexts.map(a => ({ ann: a, repeat: true }));
+  for (const { ann, repeat } of [...perPage, ...repeats]) {
+    overlay.appendChild(makePlacedTextEl(ann, repeat));
   }
 }
 
+function makePlacedTextEl(ann, isRepeat) {
+  const el = document.createElement('div');
+  el.className = 'placed-text' + (isRepeat ? ' repeat' : '');
+  el.textContent = ann.text;
+  positionPlacedText(el, ann);
+
+  if (isRepeat) {
+    const badge = document.createElement('span');
+    badge.className = 'placed-text-badge';
+    badge.textContent = '↻';
+    badge.title = 'Repeats on every page';
+    el.appendChild(badge);
+  }
+
+  const del = document.createElement('span');
+  del.className = 'placed-text-del';
+  del.textContent = '×';
+  del.title = 'Remove';
+  del.addEventListener('mousedown', (e) => { e.stopPropagation(); });
+  del.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (isRepeat) {
+      const idx = state.repeatTexts.indexOf(ann);
+      if (idx >= 0) state.repeatTexts.splice(idx, 1);
+    } else {
+      const idx = state.textAnnotations.indexOf(ann);
+      if (idx >= 0) state.textAnnotations.splice(idx, 1);
+    }
+    drawTextOverlays(null, state.zoom);
+    toast('Text removed');
+  });
+  el.appendChild(del);
+
+  el.addEventListener('mousedown', (e) => onTextMouseDown(e, el, ann));
+  return el;
+}
+
+function positionPlacedText(el, ann) {
+  const scale = state.zoom;
+  el.style.left = (ann.x * scale) + 'px';
+  el.style.top = (ann.y * scale) + 'px';
+  el.style.fontSize = (ann.size * scale) + 'px';
+  el.style.color = ann.color;
+}
+
+function onTextMouseDown(e, el, ann) {
+  // If user is placing pending text, don't intercept — let the click through
+  if (state.pendingTextPlacement) return;
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  el.classList.add('dragging');
+  const startX = e.clientX, startY = e.clientY;
+  const origX = ann.x, origY = ann.y;
+  const scale = state.zoom;
+  let moved = false;
+  function onMove(ev) {
+    const dx = (ev.clientX - startX) / scale;
+    const dy = (ev.clientY - startY) / scale;
+    if (!moved && Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) > 2) moved = true;
+    ann.x = origX + dx;
+    ann.y = origY + dy;
+    positionPlacedText(el, ann);
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    el.classList.remove('dragging');
+    if (moved) toast('Text moved');
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// ============================================================
+// Sidebar thumbnails
+// ============================================================
 async function renderThumbnails() {
   const list = $('pageList');
   list.innerHTML = '';
@@ -270,7 +363,6 @@ async function renderThumbnails() {
     thumb.draggable = true;
     thumb.dataset.uiIdx = i;
 
-    // canvas placeholder; render async
     const c = document.createElement('canvas');
     thumb.appendChild(c);
 
@@ -292,6 +384,7 @@ async function renderThumbnails() {
     thumb.addEventListener('click', () => {
       const ui = parseInt(thumb.dataset.uiIdx, 10);
       state.currentPage = ui;
+      if (state.gridMode) toggleGridMode(false);
       renderCurrentPage();
     });
 
@@ -308,6 +401,7 @@ async function renderThumbCanvas(canvas, origIdx) {
     img.onload = () => {
       canvas.width = img.width;
       canvas.height = img.height;
+      canvas.style.aspectRatio = `${img.width} / ${img.height}`;
       canvas.getContext('2d').drawImage(img, 0, 0);
     };
     img.src = state.thumbCache.get(origIdx);
@@ -316,11 +410,14 @@ async function renderThumbCanvas(canvas, origIdx) {
   try {
     const page = await state.pdfjsDoc.getPage(origIdx + 1);
     const vp1 = page.getViewport({ scale: 1 });
-    const targetW = 200;
+    const targetW = 220;
     const scale = targetW / vp1.width;
     const viewport = page.getViewport({ scale });
-    canvas.width = Math.floor(viewport.width);
-    canvas.height = Math.floor(viewport.height);
+    const w = Math.floor(viewport.width);
+    const h = Math.floor(viewport.height);
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.aspectRatio = `${w} / ${h}`;
     const ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport }).promise;
     state.thumbCache.set(origIdx, canvas.toDataURL('image/png'));
@@ -329,6 +426,10 @@ async function renderThumbCanvas(canvas, origIdx) {
 
 function highlightActiveThumb() {
   document.querySelectorAll('.page-thumb').forEach((t) => {
+    const ui = parseInt(t.dataset.uiIdx, 10);
+    t.classList.toggle('active', ui === state.currentPage);
+  });
+  document.querySelectorAll('.grid-item').forEach((t) => {
     const ui = parseInt(t.dataset.uiIdx, 10);
     t.classList.toggle('active', ui === state.currentPage);
   });
@@ -341,20 +442,20 @@ function deletePage(uiIdx) {
   }
   const removedOrig = state.pageOrder[uiIdx];
   state.pageOrder.splice(uiIdx, 1);
-  // Drop annotations + bookmarks pointing to that original page
   state.textAnnotations = state.textAnnotations.filter(a => a.pageOriginalIdx !== removedOrig);
   state.bookmarks = state.bookmarks.filter(b => b.pageOriginalIdx !== removedOrig);
   if (state.currentPage >= state.pageOrder.length) state.currentPage = state.pageOrder.length - 1;
   $('totalPages').textContent = state.pageOrder.length;
   $('pageCount').textContent = state.pageOrder.length;
   renderThumbnails();
+  if (state.gridMode) renderGridView();
   renderCurrentPage();
   renderBookmarks();
   toast('Page removed');
 }
 
 // ============================================================
-// Drag-and-drop reordering of pages
+// Drag-and-drop reordering — sidebar (vertical) and grid (any direction)
 // ============================================================
 let dragSrcIdx = null;
 function setupThumbDrag(el) {
@@ -362,13 +463,12 @@ function setupThumbDrag(el) {
     dragSrcIdx = parseInt(el.dataset.uiIdx, 10);
     el.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', String(dragSrcIdx));
+    try { e.dataTransfer.setData('text/plain', String(dragSrcIdx)); } catch (_) {}
   });
   el.addEventListener('dragend', () => {
     el.classList.remove('dragging');
-    document.querySelectorAll('.page-thumb').forEach(t => {
-      t.classList.remove('drop-before', 'drop-after');
-    });
+    document.querySelectorAll('.page-thumb').forEach(t =>
+      t.classList.remove('drop-before', 'drop-after'));
     dragSrcIdx = null;
   });
   el.addEventListener('dragover', (e) => {
@@ -391,16 +491,131 @@ function setupThumbDrag(el) {
     const r = el.getBoundingClientRect();
     const before = (e.clientY - r.top) < r.height / 2;
     let dest = before ? tgt : tgt + 1;
-    const [moved] = state.pageOrder.splice(src, 1);
-    if (src < dest) dest -= 1;
-    state.pageOrder.splice(dest, 0, moved);
-    // adjust currentPage
-    if (state.currentPage === src) state.currentPage = dest;
-    else if (src < state.currentPage && dest >= state.currentPage) state.currentPage--;
-    else if (src > state.currentPage && dest <= state.currentPage) state.currentPage++;
-    renderThumbnails();
-    renderCurrentPage();
+    movePage(src, dest);
   });
+}
+
+let gridDragSrcIdx = null;
+function setupGridDrag(el) {
+  el.addEventListener('dragstart', (e) => {
+    gridDragSrcIdx = parseInt(el.dataset.uiIdx, 10);
+    el.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', String(gridDragSrcIdx)); } catch (_) {}
+  });
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    document.querySelectorAll('.grid-item').forEach(t =>
+      t.classList.remove('drop-before', 'drop-after'));
+    gridDragSrcIdx = null;
+  });
+  el.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const r = el.getBoundingClientRect();
+    const before = (e.clientX - r.left) < r.width / 2;
+    el.classList.toggle('drop-before', before);
+    el.classList.toggle('drop-after', !before);
+  });
+  el.addEventListener('dragleave', () => {
+    el.classList.remove('drop-before', 'drop-after');
+  });
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const tgt = parseInt(el.dataset.uiIdx, 10);
+    const src = gridDragSrcIdx;
+    el.classList.remove('drop-before', 'drop-after');
+    if (src === null || src === tgt) return;
+    const r = el.getBoundingClientRect();
+    const before = (e.clientX - r.left) < r.width / 2;
+    let dest = before ? tgt : tgt + 1;
+    movePage(src, dest);
+  });
+}
+
+function movePage(src, dest) {
+  const [moved] = state.pageOrder.splice(src, 1);
+  if (src < dest) dest -= 1;
+  state.pageOrder.splice(dest, 0, moved);
+  if (state.currentPage === src) state.currentPage = dest;
+  else if (src < state.currentPage && dest >= state.currentPage) state.currentPage--;
+  else if (src > state.currentPage && dest <= state.currentPage) state.currentPage++;
+  renderThumbnails();
+  if (state.gridMode) renderGridView();
+  renderCurrentPage();
+}
+
+// ============================================================
+// Grid reorder mode
+// ============================================================
+$('reorderBtn').addEventListener('click', () => toggleGridMode());
+
+function toggleGridMode(force) {
+  const next = (typeof force === 'boolean') ? force : !state.gridMode;
+  state.gridMode = next;
+  $('canvasWrap').classList.toggle('grid-mode', next);
+  $('reorderBtn').classList.toggle('toggled', next);
+  $('reorderLabel').textContent = next ? 'Done' : 'Reorder';
+  if (next) renderGridView();
+}
+
+async function renderGridView() {
+  const grid = $('gridView');
+  grid.innerHTML = '';
+  for (let i = 0; i < state.pageOrder.length; i++) {
+    const origIdx = state.pageOrder[i];
+    const item = document.createElement('div');
+    item.className = 'grid-item';
+    item.draggable = true;
+    item.dataset.uiIdx = i;
+
+    const c = document.createElement('canvas');
+    item.appendChild(c);
+
+    const num = document.createElement('div');
+    num.className = 'grid-item-num';
+    num.textContent = i + 1;
+    item.appendChild(num);
+
+    const del = document.createElement('button');
+    del.className = 'grid-item-del';
+    del.textContent = '×';
+    del.title = 'Delete page';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deletePage(parseInt(item.dataset.uiIdx, 10));
+    });
+    item.appendChild(del);
+
+    item.addEventListener('dblclick', () => {
+      state.currentPage = parseInt(item.dataset.uiIdx, 10);
+      toggleGridMode(false);
+      renderCurrentPage();
+    });
+
+    setupGridDrag(item);
+    grid.appendChild(item);
+    renderGridCanvas(c, origIdx);
+  }
+  highlightActiveThumb();
+}
+
+async function renderGridCanvas(canvas, origIdx) {
+  // Reuse cached thumbnail at higher resolution if available, else render larger
+  try {
+    const page = await state.pdfjsDoc.getPage(origIdx + 1);
+    const vp1 = page.getViewport({ scale: 1 });
+    const targetW = 360;
+    const scale = targetW / vp1.width;
+    const viewport = page.getViewport({ scale });
+    const w = Math.floor(viewport.width);
+    const h = Math.floor(viewport.height);
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.aspectRatio = `${w} / ${h}`;
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+  } catch (e) { /* ignore */ }
 }
 
 // ============================================================
@@ -428,26 +643,27 @@ $('zoomFit').addEventListener('click', () => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if ($('editor').classList.contains('active')) {
-    if (e.target.tagName === 'INPUT') return;
-    if (e.key === 'ArrowLeft' || e.key === 'PageUp') { $('prevPage').click(); }
-    else if (e.key === 'ArrowRight' || e.key === 'PageDown') { $('nextPage').click(); }
-  }
+  if (!$('editor').classList.contains('active')) return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') $('prevPage').click();
+  else if (e.key === 'ArrowRight' || e.key === 'PageDown') $('nextPage').click();
 });
 
 let resizeRaf = null;
 window.addEventListener('resize', () => {
   if (!$('editor').classList.contains('active')) return;
+  if (state.gridMode) return;
   if (!state.fitMode) return;
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(renderCurrentPage);
 });
 
 // ============================================================
-// Add Text
+// Add Text — supports drag placement & repeat-on-all-pages
 // ============================================================
 $('addTextBtn').addEventListener('click', () => {
   $('textInput').value = '';
+  $('textRepeat').checked = false;
   openModal('textModal');
   setTimeout(() => $('textInput').focus(), 50);
 });
@@ -457,44 +673,63 @@ $('textPlace').addEventListener('click', () => {
   if (!text) { toast('Enter some text', 'error'); return; }
   const size = Math.max(6, Math.min(200, parseInt($('textSize').value, 10) || 14));
   const color = $('textColor').value;
-  state.pendingTextPlacement = { text, size, color };
+  const repeat = $('textRepeat').checked;
+  state.pendingTextPlacement = { text, size, color, repeat };
   closeModal('textModal');
   $('canvasWrap').classList.add('placing-text');
-  toast('Click on the page to place text');
+  toast(repeat ? 'Click to place — text will repeat on every page'
+                : 'Click on the page to place text');
 });
 
-$('canvasWrap').addEventListener('click', (e) => {
+// Use mousedown so we can coexist with text drag handlers (which stopPropagation)
+$('canvasWrap').addEventListener('mousedown', (e) => {
   if (!state.pendingTextPlacement) return;
+  if (state.gridMode) return;
+  if (e.button !== 0) return;
   const canvas = $('pdfCanvas');
   const r = canvas.getBoundingClientRect();
   const cx = e.clientX - r.left;
   const cy = e.clientY - r.top;
   if (cx < 0 || cy < 0 || cx > r.width || cy > r.height) return;
   const scale = state.zoom;
-  // Convert CSS px on canvas → PDF user-space (top-left coord system; we'll flip on save)
   const xPdf = cx / scale;
   const yPdfFromTop = cy / scale;
-  const origIdx = state.pageOrder[state.currentPage];
-  state.textAnnotations.push({
-    pageOriginalIdx: origIdx,
+  const ann = {
     x: xPdf,
     y: yPdfFromTop,
     text: state.pendingTextPlacement.text,
     size: state.pendingTextPlacement.size,
     color: state.pendingTextPlacement.color
-  });
+  };
+  if (state.pendingTextPlacement.repeat) {
+    state.repeatTexts.push(ann);
+  } else {
+    ann.pageOriginalIdx = state.pageOrder[state.currentPage];
+    state.textAnnotations.push(ann);
+  }
   state.pendingTextPlacement = null;
   $('canvasWrap').classList.remove('placing-text');
-  renderCurrentPage();
-  toast('Text added — click to remove', 'success');
+  drawTextOverlays(null, state.zoom);
+  toast('Text added — drag to move, × to remove', 'success');
 });
 
 // ============================================================
-// Bookmarks
+// Bookmarks (incl. anchored to selected text)
 // ============================================================
 $('addBookmarkBtn').addEventListener('click', () => {
-  $('bookmarkTitle').value = '';
+  // Capture current selection (if any) BEFORE opening modal (focus changes)
+  const sel = captureCanvasSelection();
+  state.capturedSelection = sel;
+
+  $('bookmarkTitle').value = sel ? sel.text.slice(0, 80) : '';
   $('bmPage').textContent = state.currentPage + 1;
+  if (sel) {
+    $('bmHint').innerHTML = 'Anchored to selected text on page <span id="bmPage">' +
+      (state.currentPage + 1) + '</span>.';
+  } else {
+    $('bmHint').innerHTML = 'Tip: select text on the page first to anchor the bookmark to it. ' +
+      'Otherwise it will point to page <span id="bmPage">' + (state.currentPage + 1) + '</span>.';
+  }
   openModal('bookmarkModal');
   setTimeout(() => $('bookmarkTitle').focus(), 50);
 });
@@ -502,14 +737,43 @@ $('bmCancel').addEventListener('click', () => closeModal('bookmarkModal'));
 $('bmAdd').addEventListener('click', () => {
   const title = $('bookmarkTitle').value.trim();
   if (!title) { toast('Enter a title', 'error'); return; }
-  state.bookmarks.push({
+  const bm = {
     title,
     pageOriginalIdx: state.pageOrder[state.currentPage]
-  });
+  };
+  if (state.capturedSelection) {
+    bm.x = state.capturedSelection.x;
+    bm.y = state.capturedSelection.y;
+  }
+  state.bookmarks.push(bm);
+  state.capturedSelection = null;
   closeModal('bookmarkModal');
   renderBookmarks();
   toast('Bookmark added', 'success');
 });
+
+function captureCanvasSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  const stage = $('canvasStage');
+  // Ensure selection is inside our text layer (i.e. inside the page)
+  if (!stage.contains(range.startContainer)) return null;
+  const text = sel.toString().trim();
+  if (!text) return null;
+  const rect = range.getBoundingClientRect();
+  const canvas = $('pdfCanvas');
+  const cr = canvas.getBoundingClientRect();
+  const cx = rect.left - cr.left;
+  const cy = rect.top - cr.top;
+  const scale = state.zoom;
+  return {
+    text,
+    x: cx / scale,
+    y: cy / scale,
+    pageOriginalIdx: state.pageOrder[state.currentPage]
+  };
+}
 
 function renderBookmarks() {
   const list = $('bookmarkList');
@@ -525,6 +789,15 @@ function renderBookmarks() {
     const item = document.createElement('div');
     item.className = 'bookmark-item';
     const uiPage = state.pageOrder.indexOf(b.pageOriginalIdx);
+
+    if (b.x !== undefined) {
+      const anchor = document.createElement('span');
+      anchor.className = 'bm-anchor';
+      anchor.textContent = '“';
+      anchor.title = 'Anchored to text';
+      item.appendChild(anchor);
+    }
+
     const titleEl = document.createElement('span');
     titleEl.className = 'bm-title';
     titleEl.textContent = b.title;
@@ -540,17 +813,31 @@ function renderBookmarks() {
       state.bookmarks.splice(i, 1);
       renderBookmarks();
     });
+
     item.appendChild(titleEl);
     item.appendChild(pg);
     item.appendChild(del);
-    item.addEventListener('click', () => {
-      if (uiPage >= 0) {
-        state.currentPage = uiPage;
-        renderCurrentPage();
-      }
-    });
+    item.addEventListener('click', () => gotoBookmark(b));
     list.appendChild(item);
   });
+}
+
+async function gotoBookmark(b) {
+  const uiPage = state.pageOrder.indexOf(b.pageOriginalIdx);
+  if (uiPage < 0) return;
+  if (state.gridMode) toggleGridMode(false);
+  state.currentPage = uiPage;
+  await renderCurrentPage();
+  if (b.x !== undefined && b.y !== undefined) {
+    const wrap = $('canvasWrap');
+    const cx = b.x * state.zoom;
+    const cy = b.y * state.zoom;
+    wrap.scrollTo({
+      left: Math.max(0, cx - 60),
+      top: Math.max(0, cy - 60),
+      behavior: 'smooth'
+    });
+  }
 }
 
 // ============================================================
@@ -575,35 +862,37 @@ async function savePdf() {
     const newDoc = await PDFDocument.create();
     const helvetica = await newDoc.embedFont(StandardFonts.Helvetica);
 
-    // Copy pages in current order
     const copied = await newDoc.copyPages(srcDoc, state.pageOrder);
-    // Maps: original page index -> position in newDoc
     const origToNewIdx = new Map();
     copied.forEach((p, i) => {
       newDoc.addPage(p);
       origToNewIdx.set(state.pageOrder[i], i);
     });
 
-    // Apply text annotations (PDF y-axis is bottom-up)
+    // Per-page text annotations
     for (const a of state.textAnnotations) {
       const newIdx = origToNewIdx.get(a.pageOriginalIdx);
       if (newIdx === undefined) continue;
-      const page = newDoc.getPage(newIdx);
-      const { height } = page.getSize();
-      const { r, g, b } = hexToRgb01(a.color);
-      page.drawText(a.text, {
-        x: a.x,
-        y: height - a.y - a.size,  // baseline anchor approximation
-        size: a.size,
-        font: helvetica,
-        color: rgb(r, g, b)
-      });
+      drawTextOnPage(newDoc.getPage(newIdx), a, helvetica);
     }
 
-    // Apply bookmarks (PDF outline)
+    // Repeat texts → apply to every page
+    if (state.repeatTexts.length > 0) {
+      for (let pi = 0; pi < newDoc.getPageCount(); pi++) {
+        const page = newDoc.getPage(pi);
+        for (const a of state.repeatTexts) drawTextOnPage(page, a, helvetica);
+      }
+    }
+
+    // Bookmarks
     if (state.bookmarks.length > 0) {
       addOutline(newDoc, state.bookmarks
-        .map(b => ({ title: b.title, pageIndex: origToNewIdx.get(b.pageOriginalIdx) }))
+        .map(b => ({
+          title: b.title,
+          pageIndex: origToNewIdx.get(b.pageOriginalIdx),
+          x: b.x,
+          y: b.y
+        }))
         .filter(b => b.pageIndex !== undefined));
     }
 
@@ -618,8 +907,19 @@ async function savePdf() {
   }
 }
 
-// Build a flat PDF outline (bookmarks).
-// Reference: PDF 1.7 §12.3 Document-level navigation.
+function drawTextOnPage(page, a, font) {
+  const { height } = page.getSize();
+  const { r, g, b } = hexToRgb01(a.color);
+  page.drawText(a.text, {
+    x: a.x,
+    y: height - a.y - a.size, // baseline approximation
+    size: a.size,
+    font,
+    color: rgb(r, g, b)
+  });
+}
+
+// PDF outline. When item has x,y (in top-left PDF coords), use them in /XYZ Dest.
 function addOutline(pdfDoc, items) {
   if (items.length === 0) return;
   const ctx = pdfDoc.context;
@@ -628,12 +928,19 @@ function addOutline(pdfDoc, items) {
 
   items.forEach((it, i) => {
     const page = pdfDoc.getPage(it.pageIndex);
+    const { height } = page.getSize();
     const dest = PDFArray.withContext(ctx);
     dest.push(page.ref);
     dest.push(PDFName.of('XYZ'));
-    dest.push(ctx.obj(null));   // left
-    dest.push(ctx.obj(null));   // top
-    dest.push(ctx.obj(null));   // zoom
+    if (it.x !== undefined && it.y !== undefined) {
+      dest.push(PDFNumber.of(it.x));
+      dest.push(PDFNumber.of(height - it.y));
+      dest.push(ctx.obj(null));
+    } else {
+      dest.push(ctx.obj(null));
+      dest.push(ctx.obj(null));
+      dest.push(ctx.obj(null));
+    }
     const dict = ctx.obj({
       Title: PDFString.of(it.title),
       Parent: outlinesRef,
@@ -644,14 +951,12 @@ function addOutline(pdfDoc, items) {
     ctx.assign(itemRefs[i], dict);
   });
 
-  const outlinesDict = ctx.obj({
+  ctx.assign(outlinesRef, ctx.obj({
     Type: PDFName.of('Outlines'),
     First: itemRefs[0],
     Last: itemRefs[itemRefs.length - 1],
     Count: items.length
-  });
-  ctx.assign(outlinesRef, outlinesDict);
-
+  }));
   pdfDoc.catalog.set(PDFName.of('Outlines'), outlinesRef);
   pdfDoc.catalog.set(PDFName.of('PageMode'), PDFName.of('UseOutlines'));
 }
@@ -818,7 +1123,7 @@ $('doMergeBtn').addEventListener('click', async () => {
 });
 
 // ============================================================
-// Modal background click closes
+// Modals
 // ============================================================
 document.querySelectorAll('.modal').forEach(m => {
   m.addEventListener('click', (e) => {

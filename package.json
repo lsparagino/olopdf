@@ -1,0 +1,37 @@
+{
+  "name": "pdf-editor",
+  "version": "1.0.0",
+  "description": "Portable PDF editor for Windows",
+  "main": "main.js",
+  "author": "Lucas",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "3.11.174"
+  },
+  "build": {
+    "appId": "com.lucas.pdfeditor",
+    "productName": "PDF Editor",
+    "files": [
+      "main.js",
+      "renderer/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": "portable",
+      "artifactName": "PDF-Editor-Portable.exe"
+    },
+    "portable": {
+      "artifactName": "PDF-Editor-Portable.exe"
+    }
+  }
+}

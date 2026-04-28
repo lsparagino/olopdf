@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>PDF Editor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Animated background -->
+  <div class="bg-gradient"></div>
+  <div class="bg-blobs">
+    <div class="blob blob-1"></div>
+    <div class="blob blob-2"></div>
+    <div class="blob blob-3"></div>
+    <div class="blob blob-4"></div>
+  </div>
+  <div class="bg-grain"></div>
+
+  <!-- Custom title bar -->
+  <header class="titlebar">
+    <div class="titlebar-drag">
+      <div class="app-mark">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="9" y1="14" x2="15" y2="14"/>
+          <line x1="9" y1="18" x2="13" y2="18"/>
+        </svg>
+      </div>
+      <span class="app-title">PDF Editor</span>
+    </div>
+    <div class="window-controls">
+      <button id="winMin" class="win-btn" title="Minimize">
+        <svg viewBox="0 0 12 12" width="10" height="10"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+      <button id="winMax" class="win-btn" title="Maximize">
+        <svg viewBox="0 0 12 12" width="10" height="10"><rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+      <button id="winClose" class="win-btn close" title="Close">
+        <svg viewBox="0 0 12 12" width="10" height="10"><line x1="3" y1="3" x2="9" y2="9" stroke="currentColor" stroke-width="1.2"/><line x1="9" y1="3" x2="3" y2="9" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="app">
+    <!-- Welcome screen -->
+    <section id="welcome" class="screen welcome active">
+      <div class="welcome-card glass" id="dropZone">
+        <div class="welcome-icon">
+          <svg viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="url(#g1)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <defs>
+              <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#a78bfa"/>
+                <stop offset="100%" stop-color="#ec4899"/>
+              </linearGradient>
+            </defs>
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <h1>PDF Editor</h1>
+        <p class="subtitle">Modern, portable, beautiful</p>
+        <p class="hint">Drop a PDF anywhere or pick an action below</p>
+        <div class="welcome-actions">
+          <button class="btn primary" id="openBtn">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            Open PDF
+          </button>
+          <button class="btn" id="mergeBtn">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
+            Merge PDFs
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Editor screen -->
+    <section id="editor" class="screen editor">
+      <aside class="sidebar glass left-sidebar">
+        <div class="sidebar-header">
+          <span>Pages</span>
+          <span id="pageCount" class="badge">0</span>
+        </div>
+        <div id="pageList" class="page-list"></div>
+      </aside>
+
+      <main class="content">
+        <div class="toolbar glass">
+          <button class="btn ghost small" id="backBtn" title="Back to home">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+            Home
+          </button>
+          <span id="filename" class="filename">document.pdf</span>
+          <div class="toolbar-actions">
+            <button class="btn ghost small" id="addTextBtn" title="Add text">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+              Text
+            </button>
+            <button class="btn ghost small" id="addBookmarkBtn" title="Bookmark current page">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+              Bookmark
+            </button>
+            <button class="btn primary small" id="saveBtn">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              Save
+            </button>
+          </div>
+        </div>
+
+        <div class="canvas-wrap" id="canvasWrap">
+          <div class="canvas-stage" id="canvasStage">
+            <canvas id="pdfCanvas"></canvas>
+            <div class="text-overlay" id="textOverlay"></div>
+          </div>
+        </div>
+
+        <div class="page-nav glass">
+          <button class="btn icon" id="prevPage" title="Previous page">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <span class="page-indicator"><span id="curPage">1</span> / <span id="totalPages">1</span></span>
+          <button class="btn icon" id="nextPage" title="Next page">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+          <span class="divider"></span>
+          <button class="btn icon" id="zoomOut" title="Zoom out">−</button>
+          <span id="zoomLabel" class="zoom-label">100%</span>
+          <button class="btn icon" id="zoomIn" title="Zoom in">+</button>
+          <button class="btn icon" id="zoomFit" title="Fit to page">⤢</button>
+        </div>
+      </main>
+
+      <aside class="sidebar glass right-sidebar">
+        <div class="sidebar-header">Bookmarks</div>
+        <div id="bookmarkList" class="bookmark-list">
+          <div class="empty-state">No bookmarks yet</div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- Merge screen -->
+    <section id="merge" class="screen merge">
+      <div class="merge-header">
+        <button class="btn ghost small" id="mergeBackBtn">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+          Home
+        </button>
+        <h2>Merge PDFs</h2>
+        <button class="btn primary" id="doMergeBtn" disabled>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/></svg>
+          Merge & Save
+        </button>
+      </div>
+      <div class="merge-body glass" id="mergeBody">
+        <div id="mergeList" class="merge-list"></div>
+        <div class="merge-empty" id="mergeEmpty">
+          <svg viewBox="0 0 24 24" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p>Drop PDF files here</p>
+          <p class="hint">Drag to reorder. Click × to remove.</p>
+        </div>
+        <button class="btn" id="addMoreBtn">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add PDF
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Add Text Modal -->
+  <div id="textModal" class="modal">
+    <div class="modal-content glass">
+      <h3>Add Text</h3>
+      <div class="form-row">
+        <input type="text" id="textInput" placeholder="Text content" autofocus>
+      </div>
+      <div class="form-grid">
+        <label>
+          <span>Size</span>
+          <input type="number" id="textSize" value="14" min="6" max="200">
+        </label>
+        <label>
+          <span>Color</span>
+          <input type="color" id="textColor" value="#111111">
+        </label>
+      </div>
+      <p class="hint">After confirming, click on the page to place the text.</p>
+      <div class="modal-actions">
+        <button class="btn ghost" id="textCancel">Cancel</button>
+        <button class="btn primary" id="textPlace">Place Text</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bookmark Modal -->
+  <div id="bookmarkModal" class="modal">
+    <div class="modal-content glass">
+      <h3>Add Bookmark</h3>
+      <div class="form-row">
+        <input type="text" id="bookmarkTitle" placeholder="Bookmark title" autofocus>
+      </div>
+      <p class="hint">Will point to page <span id="bmPage">1</span></p>
+      <div class="modal-actions">
+        <button class="btn ghost" id="bmCancel">Cancel</button>
+        <button class="btn primary" id="bmAdd">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loading" class="loading-overlay">
+    <div class="spinner"></div>
+    <p id="loadingText">Working...</p>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

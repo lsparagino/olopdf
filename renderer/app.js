@@ -3,7 +3,14 @@
 // ============================================================
 const path = require('path');
 const fs = require('fs');
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webFrame } = require('electron');
+
+// Lock the renderer's own zoom so Ctrl+wheel / Ctrl+= / pinch never zoom the chrome.
+// All zooming below acts on the PDF canvas only.
+try {
+  webFrame.setZoomFactor(1);
+  webFrame.setVisualZoomLevelLimits(1, 1);
+} catch (_) {}
 
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 const { PDFDocument, StandardFonts, rgb, PDFName, PDFString, PDFArray, PDFNumber } = require('pdf-lib');
@@ -51,6 +58,7 @@ const $ = (id) => document.getElementById(id);
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   $(id).classList.add('active');
+  if (id === 'welcome') renderRecents();
 }
 
 function showLoading(text = 'Working...') {
@@ -149,11 +157,66 @@ async function openPdfFromPath(filePath) {
     const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
     await loadPdfBytes(ab, filePath);
     showScreen('editor');
+    try { await ipcRenderer.invoke('recents:add', filePath); } catch {}
   } catch (err) {
     console.error(err);
     toast('Failed to open PDF: ' + err.message, 'error');
   } finally {
     hideLoading();
+  }
+}
+
+// ============================================================
+// Recents
+// ============================================================
+async function renderRecents() {
+  let list = [];
+  try { list = await ipcRenderer.invoke('recents:get'); } catch {}
+  // Filter to only files that still exist on disk
+  const existing = [];
+  for (const p of list) {
+    try { await fs.promises.access(p, fs.constants.F_OK); existing.push(p); } catch {}
+  }
+  const recentsEl = $('recents');
+  const listEl = $('recentsList');
+  listEl.innerHTML = '';
+  if (existing.length === 0) {
+    recentsEl.style.display = 'none';
+    return;
+  }
+  recentsEl.style.display = '';
+  for (const p of existing) {
+    const item = document.createElement('button');
+    item.className = 'recent-item';
+    item.title = p;
+
+    const icon = document.createElement('span');
+    icon.className = 'recent-icon';
+    icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+
+    const info = document.createElement('span');
+    info.className = 'recent-info';
+    const name = document.createElement('span');
+    name.className = 'recent-name';
+    name.textContent = path.basename(p);
+    const dir = document.createElement('span');
+    dir.className = 'recent-dir';
+    dir.textContent = path.dirname(p);
+    info.append(name, dir);
+
+    const remove = document.createElement('span');
+    remove.className = 'recent-remove';
+    remove.textContent = '×';
+    remove.title = 'Remove from recents';
+    remove.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try { await ipcRenderer.invoke('recents:remove', p); } catch {}
+      renderRecents();
+    });
+
+    item.append(icon, info, remove);
+    item.addEventListener('click', () => openPdfFromPath(p));
+    listEl.appendChild(item);
   }
 }
 
@@ -235,29 +298,37 @@ async function renderCurrentPage() {
   highlightActiveThumb();
 }
 
+// Manual text layer rendering. Each text run becomes an absolutely-positioned span.
+// We control all styling so user-select can never be blocked by upstream CSS.
 async function renderTextLayer(page, viewport) {
   const layer = $('textLayer');
   layer.innerHTML = '';
   layer.style.width = viewport.width + 'px';
   layer.style.height = viewport.height + 'px';
-  if (state.textLayerTask) {
-    try { state.textLayerTask.cancel(); } catch (_) {}
-  }
   try {
     const textContent = await page.getTextContent();
-    const task = pdfjsLib.renderTextLayer({
-      textContent,
-      textContentSource: textContent,
-      container: layer,
-      viewport,
-      textDivs: []
-    });
-    state.textLayerTask = task;
-    if (task && task.promise) await task.promise;
+    const styles = textContent.styles || {};
+    const fragment = document.createDocumentFragment();
+    for (const item of textContent.items) {
+      if (!item.str) continue;
+      const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+      const angle = Math.atan2(tx[1], tx[0]);
+      const fontHeight = Math.hypot(tx[2], tx[3]);
+      if (fontHeight <= 0) continue;
+      const span = document.createElement('span');
+      span.textContent = item.str;
+      span.style.left = `${tx[4]}px`;
+      span.style.top = `${tx[5] - fontHeight}px`;
+      span.style.fontSize = `${fontHeight}px`;
+      const family = (styles[item.fontName] && styles[item.fontName].fontFamily) || 'sans-serif';
+      span.style.fontFamily = family;
+      if (angle !== 0) span.style.transform = `rotate(${angle}rad)`;
+      fragment.appendChild(span);
+    }
+    layer.appendChild(fragment);
   } catch (e) {
     console.warn('Text layer render failed', e);
   }
-  state.textLayerTask = null;
 }
 
 // ============================================================
@@ -396,12 +467,13 @@ async function renderThumbnails() {
 }
 
 async function renderThumbCanvas(canvas, origIdx) {
+  const wrap = canvas.parentElement; // the .page-thumb (or .grid-item)
   if (state.thumbCache.has(origIdx)) {
     const img = new Image();
     img.onload = () => {
       canvas.width = img.width;
       canvas.height = img.height;
-      canvas.style.aspectRatio = `${img.width} / ${img.height}`;
+      if (wrap) wrap.style.aspectRatio = `${img.width} / ${img.height}`;
       canvas.getContext('2d').drawImage(img, 0, 0);
     };
     img.src = state.thumbCache.get(origIdx);
@@ -410,14 +482,14 @@ async function renderThumbCanvas(canvas, origIdx) {
   try {
     const page = await state.pdfjsDoc.getPage(origIdx + 1);
     const vp1 = page.getViewport({ scale: 1 });
-    const targetW = 220;
+    const targetW = 240;
     const scale = targetW / vp1.width;
     const viewport = page.getViewport({ scale });
     const w = Math.floor(viewport.width);
     const h = Math.floor(viewport.height);
     canvas.width = w;
     canvas.height = h;
-    canvas.style.aspectRatio = `${w} / ${h}`;
+    if (wrap) wrap.style.aspectRatio = `${w} / ${h}`;
     const ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport }).promise;
     state.thumbCache.set(origIdx, canvas.toDataURL('image/png'));
@@ -601,7 +673,7 @@ async function renderGridView() {
 }
 
 async function renderGridCanvas(canvas, origIdx) {
-  // Reuse cached thumbnail at higher resolution if available, else render larger
+  const wrap = canvas.parentElement;
   try {
     const page = await state.pdfjsDoc.getPage(origIdx + 1);
     const vp1 = page.getViewport({ scale: 1 });
@@ -612,7 +684,7 @@ async function renderGridCanvas(canvas, origIdx) {
     const h = Math.floor(viewport.height);
     canvas.width = w;
     canvas.height = h;
-    canvas.style.aspectRatio = `${w} / ${h}`;
+    if (wrap) wrap.style.aspectRatio = `${w} / ${h}`;
     const ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport }).promise;
   } catch (e) { /* ignore */ }
@@ -649,6 +721,31 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowRight' || e.key === 'PageDown') $('nextPage').click();
 });
 
+// Intercept browser zoom shortcuts globally and route them to PDF zoom
+window.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  if (!['+', '=', '-', '_', '0'].includes(e.key)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (!$('editor').classList.contains('active') || state.gridMode) return;
+  if (e.key === '0') $('zoomFit').click();
+  else if (e.key === '-' || e.key === '_') $('zoomOut').click();
+  else $('zoomIn').click();
+}, { capture: true });
+
+// Ctrl+wheel zoom — also intercepted so Chromium doesn't zoom the chrome
+window.addEventListener('wheel', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (!$('editor').classList.contains('active') || state.gridMode || !state.pdfjsDoc) return;
+  state.fitMode = false;
+  const step = 0.1;
+  if (e.deltaY < 0) state.zoom = Math.min(state.zoom + step, 5);
+  else state.zoom = Math.max(state.zoom - step, 0.2);
+  renderCurrentPage();
+}, { capture: true, passive: false });
+
 let resizeRaf = null;
 window.addEventListener('resize', () => {
   if (!$('editor').classList.contains('active')) return;
@@ -681,37 +778,76 @@ $('textPlace').addEventListener('click', () => {
                 : 'Click on the page to place text');
 });
 
-// Use mousedown so we can coexist with text drag handlers (which stopPropagation)
+// Single mousedown handler with priority order:
+//   pending text placement → place text
+//   target inside placed-text → handled by its own listener (already stopPropagation'd)
+//   target is a text-layer span → let browser handle text selection
+//   otherwise → pan the scroll container
 $('canvasWrap').addEventListener('mousedown', (e) => {
-  if (!state.pendingTextPlacement) return;
-  if (state.gridMode) return;
   if (e.button !== 0) return;
-  const canvas = $('pdfCanvas');
-  const r = canvas.getBoundingClientRect();
-  const cx = e.clientX - r.left;
-  const cy = e.clientY - r.top;
-  if (cx < 0 || cy < 0 || cx > r.width || cy > r.height) return;
-  const scale = state.zoom;
-  const xPdf = cx / scale;
-  const yPdfFromTop = cy / scale;
-  const ann = {
-    x: xPdf,
-    y: yPdfFromTop,
-    text: state.pendingTextPlacement.text,
-    size: state.pendingTextPlacement.size,
-    color: state.pendingTextPlacement.color
-  };
-  if (state.pendingTextPlacement.repeat) {
-    state.repeatTexts.push(ann);
-  } else {
-    ann.pageOriginalIdx = state.pageOrder[state.currentPage];
-    state.textAnnotations.push(ann);
+  if (state.gridMode) return;
+
+  // 1. Pending text placement
+  if (state.pendingTextPlacement) {
+    const canvas = $('pdfCanvas');
+    const r = canvas.getBoundingClientRect();
+    const cx = e.clientX - r.left;
+    const cy = e.clientY - r.top;
+    if (cx < 0 || cy < 0 || cx > r.width || cy > r.height) return;
+    const scale = state.zoom;
+    const ann = {
+      x: cx / scale,
+      y: cy / scale,
+      text: state.pendingTextPlacement.text,
+      size: state.pendingTextPlacement.size,
+      color: state.pendingTextPlacement.color
+    };
+    if (state.pendingTextPlacement.repeat) {
+      state.repeatTexts.push(ann);
+    } else {
+      ann.pageOriginalIdx = state.pageOrder[state.currentPage];
+      state.textAnnotations.push(ann);
+    }
+    state.pendingTextPlacement = null;
+    $('canvasWrap').classList.remove('placing-text');
+    drawTextOverlays(null, state.zoom);
+    toast('Text added — drag to move, × to remove', 'success');
+    return;
   }
-  state.pendingTextPlacement = null;
-  $('canvasWrap').classList.remove('placing-text');
-  drawTextOverlays(null, state.zoom);
-  toast('Text added — drag to move, × to remove', 'success');
+
+  // 2. Click on a text-layer span → text selection has priority
+  const layer = $('textLayer');
+  if (layer && layer !== e.target && layer.contains(e.target)) return;
+
+  // 3. Otherwise, start panning the canvas-wrap scroll container
+  startPan(e);
 });
+
+function startPan(e) {
+  const wrap = $('canvasWrap');
+  const stage = $('canvasStage');
+  // Only pan if there's actually overflow worth panning
+  const canPanX = wrap.scrollWidth > wrap.clientWidth;
+  const canPanY = wrap.scrollHeight > wrap.clientHeight;
+  if (!canPanX && !canPanY) return;
+
+  e.preventDefault();
+  stage.classList.add('panning');
+  let lastX = e.clientX, lastY = e.clientY;
+  function onMove(ev) {
+    if (canPanX) wrap.scrollLeft -= (ev.clientX - lastX);
+    if (canPanY) wrap.scrollTop  -= (ev.clientY - lastY);
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    stage.classList.remove('panning');
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
 
 // ============================================================
 // Bookmarks (incl. anchored to selected text)

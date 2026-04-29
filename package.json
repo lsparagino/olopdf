@@ -1,12 +1,16 @@
 {
   "name": "pdf-editor",
-  "version": "1.0.0",
-  "description": "Portable PDF editor for Windows",
+  "version": "1.0.1",
+  "description": "Modern, portable PDF editor — curated by Olopad",
   "main": "main.js",
-  "author": "Lucas",
+  "author": {
+    "name": "Olopad",
+    "email": "luca@sparagino.it"
+  },
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "prebuild": "npm version patch --no-git-tag-version",
     "build": "electron-builder --win portable",
     "dist": "electron-builder --win portable"
   },
@@ -19,12 +23,20 @@
     "pdfjs-dist": "3.11.174"
   },
   "build": {
-    "appId": "com.lucas.pdfeditor",
+    "appId": "com.olopad.pdfeditor",
     "productName": "PDF Editor",
+    "copyright": "Copyright © 2026 Olopad",
+    "npmRebuild": false,
+    "buildDependenciesFromSource": false,
     "files": [
       "main.js",
       "renderer/**/*",
-      "node_modules/**/*"
+      "node_modules/**/*",
+      "!node_modules/canvas/**/*",
+      "!node_modules/**/*.{md,markdown,map,ts,d.ts}",
+      "!node_modules/**/{test,tests,docs,example,examples}/**",
+      "!node_modules/**/.bin",
+      "!node_modules/**/*.{cc,cpp,h,c,gyp,mk}"
     ],
     "win": {
       "target": "portable",

@@ -3,7 +3,7 @@
 // ============================================================
 const path = require('path');
 const fs = require('fs');
-const { ipcRenderer, webFrame } = require('electron');
+const { ipcRenderer, webFrame, shell } = require('electron');
 
 // Lock the renderer's own zoom so Ctrl+wheel / Ctrl+= / pinch never zoom the chrome.
 // All zooming below acts on the PDF canvas only.
@@ -390,6 +390,10 @@ function positionPlacedText(el, ann) {
   el.style.top = (ann.y * scale) + 'px';
   el.style.fontSize = (ann.size * scale) + 'px';
   el.style.color = ann.color;
+  el.style.fontFamily = cssFontFamily(ann.font || 'helvetica');
+  el.style.fontWeight = ann.bold ? '700' : '400';
+  el.style.fontStyle = ann.italic ? 'italic' : 'normal';
+  el.style.textDecoration = ann.underline ? 'underline' : 'none';
 }
 
 function onTextMouseDown(e, el, ann) {
@@ -399,6 +403,7 @@ function onTextMouseDown(e, el, ann) {
   e.preventDefault();
   e.stopPropagation();
   el.classList.add('dragging');
+  document.body.classList.add('text-dragging');
   const startX = e.clientX, startY = e.clientY;
   const origX = ann.x, origY = ann.y;
   const scale = state.zoom;
@@ -415,6 +420,7 @@ function onTextMouseDown(e, el, ann) {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
     el.classList.remove('dragging');
+    document.body.classList.remove('text-dragging');
     if (moved) toast('Text moved');
   }
   document.addEventListener('mousemove', onMove);
@@ -761,22 +767,52 @@ window.addEventListener('resize', () => {
 $('addTextBtn').addEventListener('click', () => {
   $('textInput').value = '';
   $('textRepeat').checked = false;
+  $('textFont').value = 'helvetica';
+  $('textBold').classList.remove('active');
+  $('textItalic').classList.remove('active');
+  $('textUnderline').classList.remove('active');
   openModal('textModal');
   setTimeout(() => $('textInput').focus(), 50);
+});
+['textBold', 'textItalic', 'textUnderline'].forEach(id => {
+  $(id).addEventListener('click', () => $(id).classList.toggle('active'));
+});
+// Ctrl+B / Ctrl+I / Ctrl+U toggle inside the text input
+$('textInput').addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'b') { e.preventDefault(); $('textBold').classList.toggle('active'); }
+  else if (k === 'i') { e.preventDefault(); $('textItalic').classList.toggle('active'); }
+  else if (k === 'u') { e.preventDefault(); $('textUnderline').classList.toggle('active'); }
 });
 $('textCancel').addEventListener('click', () => closeModal('textModal'));
 $('textPlace').addEventListener('click', () => {
   const text = $('textInput').value.trim();
   if (!text) { toast('Enter some text', 'error'); return; }
-  const size = Math.max(6, Math.min(200, parseInt($('textSize').value, 10) || 14));
-  const color = $('textColor').value;
-  const repeat = $('textRepeat').checked;
-  state.pendingTextPlacement = { text, size, color, repeat };
+  state.pendingTextPlacement = {
+    text,
+    size: Math.max(6, Math.min(200, parseInt($('textSize').value, 10) || 14)),
+    color: $('textColor').value,
+    repeat: $('textRepeat').checked,
+    font: $('textFont').value,
+    bold: $('textBold').classList.contains('active'),
+    italic: $('textItalic').classList.contains('active'),
+    underline: $('textUnderline').classList.contains('active')
+  };
   closeModal('textModal');
   $('canvasWrap').classList.add('placing-text');
-  toast(repeat ? 'Click to place — text will repeat on every page'
-                : 'Click on the page to place text');
+  toast(state.pendingTextPlacement.repeat
+    ? 'Click to place — text will repeat on every page'
+    : 'Click on the page to place text');
 });
+
+function cssFontFamily(font) {
+  switch (font) {
+    case 'times': return '"Times New Roman", Times, serif';
+    case 'courier': return '"Courier New", Courier, monospace';
+    default: return 'Helvetica, Arial, sans-serif';
+  }
+}
 
 // Single mousedown handler with priority order:
 //   pending text placement → place text
@@ -795,14 +831,19 @@ $('canvasWrap').addEventListener('mousedown', (e) => {
     const cy = e.clientY - r.top;
     if (cx < 0 || cy < 0 || cx > r.width || cy > r.height) return;
     const scale = state.zoom;
+    const p = state.pendingTextPlacement;
     const ann = {
       x: cx / scale,
       y: cy / scale,
-      text: state.pendingTextPlacement.text,
-      size: state.pendingTextPlacement.size,
-      color: state.pendingTextPlacement.color
+      text: p.text,
+      size: p.size,
+      color: p.color,
+      font: p.font || 'helvetica',
+      bold: !!p.bold,
+      italic: !!p.italic,
+      underline: !!p.underline
     };
-    if (state.pendingTextPlacement.repeat) {
+    if (p.repeat) {
       state.repeatTexts.push(ann);
     } else {
       ann.pageOriginalIdx = state.pageOrder[state.currentPage];
@@ -996,7 +1037,11 @@ async function savePdf() {
     showLoading('Saving PDF...');
     const srcDoc = await PDFDocument.load(state.pdfBytes);
     const newDoc = await PDFDocument.create();
-    const helvetica = await newDoc.embedFont(StandardFonts.Helvetica);
+    const fontCache = new Map();
+    async function getFont(name) {
+      if (!fontCache.has(name)) fontCache.set(name, await newDoc.embedFont(name));
+      return fontCache.get(name);
+    }
 
     const copied = await newDoc.copyPages(srcDoc, state.pageOrder);
     const origToNewIdx = new Map();
@@ -1009,14 +1054,14 @@ async function savePdf() {
     for (const a of state.textAnnotations) {
       const newIdx = origToNewIdx.get(a.pageOriginalIdx);
       if (newIdx === undefined) continue;
-      drawTextOnPage(newDoc.getPage(newIdx), a, helvetica);
+      await drawTextOnPage(newDoc.getPage(newIdx), a, getFont);
     }
 
     // Repeat texts → apply to every page
     if (state.repeatTexts.length > 0) {
       for (let pi = 0; pi < newDoc.getPageCount(); pi++) {
         const page = newDoc.getPage(pi);
-        for (const a of state.repeatTexts) drawTextOnPage(page, a, helvetica);
+        for (const a of state.repeatTexts) await drawTextOnPage(page, a, getFont);
       }
     }
 
@@ -1043,16 +1088,50 @@ async function savePdf() {
   }
 }
 
-function drawTextOnPage(page, a, font) {
+function pickStandardFont(family, bold, italic) {
+  if (family === 'times') {
+    if (bold && italic) return StandardFonts.TimesRomanBoldItalic;
+    if (bold) return StandardFonts.TimesRomanBold;
+    if (italic) return StandardFonts.TimesRomanItalic;
+    return StandardFonts.TimesRoman;
+  }
+  if (family === 'courier') {
+    if (bold && italic) return StandardFonts.CourierBoldOblique;
+    if (bold) return StandardFonts.CourierBold;
+    if (italic) return StandardFonts.CourierOblique;
+    return StandardFonts.Courier;
+  }
+  if (bold && italic) return StandardFonts.HelveticaBoldOblique;
+  if (bold) return StandardFonts.HelveticaBold;
+  if (italic) return StandardFonts.HelveticaOblique;
+  return StandardFonts.Helvetica;
+}
+
+async function drawTextOnPage(page, a, getFont) {
+  const fontName = pickStandardFont(a.font || 'helvetica', !!a.bold, !!a.italic);
+  const font = await getFont(fontName);
   const { height } = page.getSize();
   const { r, g, b } = hexToRgb01(a.color);
+  const baselineY = height - a.y - a.size; // baseline approximation
   page.drawText(a.text, {
     x: a.x,
-    y: height - a.y - a.size, // baseline approximation
+    y: baselineY,
     size: a.size,
     font,
     color: rgb(r, g, b)
   });
+  if (a.underline) {
+    let textWidth;
+    try { textWidth = font.widthOfTextAtSize(a.text, a.size); }
+    catch (_) { textWidth = a.text.length * a.size * 0.5; }
+    const ulY = baselineY - Math.max(1, a.size * 0.08);
+    page.drawLine({
+      start: { x: a.x, y: ulY },
+      end:   { x: a.x + textWidth, y: ulY },
+      thickness: Math.max(0.5, a.size * 0.06),
+      color: rgb(r, g, b)
+    });
+  }
 }
 
 // PDF outline. When item has x,y (in top-left PDF coords), use them in /XYZ Dest.
@@ -1274,6 +1353,19 @@ window.addEventListener('keydown', (e) => {
       $('canvasWrap').classList.remove('placing-text');
     }
   }
+});
+
+// ============================================================
+// Curator branding (Olopad) + version
+// ============================================================
+const CURATOR_URL = 'https://olopad.com';
+try {
+  const pkg = require('../package.json');
+  $('appVersion').textContent = 'v' + pkg.version;
+} catch (_) {}
+$('curatorLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  try { shell.openExternal(CURATOR_URL); } catch (_) {}
 });
 
 // Initial screen

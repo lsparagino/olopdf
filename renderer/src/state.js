@@ -13,6 +13,8 @@ const state = {
   zoom: 1.0,
   fitMode: true,
   thumbCache: new Map(),     // origIdx -> dataURL
+  baseViewport: null,        // unscaled width/height of the current page (for CSS-only zoom)
+  renderedZoom: null,        // the zoom at which the current canvas bitmap was rendered
   renderTask: null,
   pendingTextPlacement: null,
   capturedSelection: null,   // selection captured for the next bookmark

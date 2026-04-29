@@ -155,10 +155,24 @@ function renderGridView() {
 }
 
 function highlightActiveThumb() {
+  let activeSidebar = null;
   document.querySelectorAll('.page-thumb, .grid-item').forEach((t) => {
     const ui = parseInt(t.dataset.uiIdx, 10);
-    t.classList.toggle('active', ui === state.currentPage);
+    const isActive = ui === state.currentPage;
+    t.classList.toggle('active', isActive);
+    if (isActive && t.classList.contains('page-thumb')) activeSidebar = t;
   });
+  if (activeSidebar) centerSidebarThumb(activeSidebar);
+}
+
+// Center the active thumb vertically in the sidebar list. Clamped to the
+// scrollable range so it sits at the top/bottom near the document edges.
+function centerSidebarThumb(thumb) {
+  const list = thumb.parentElement;
+  if (!list) return;
+  const target = thumb.offsetTop - (list.clientHeight / 2) + (thumb.clientHeight / 2);
+  const max = list.scrollHeight - list.clientHeight;
+  list.scrollTop = Math.max(0, Math.min(target, max));
 }
 
 // ---- Grid mode toggle ----

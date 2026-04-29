@@ -53,6 +53,7 @@ $('nextPage').addEventListener('click', () => gotoPage(state.currentPage + 1));
 window.addEventListener('keydown', (e) => {
   if (!$('editor').classList.contains('active')) return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.target.isContentEditable) return;          // inline text/bookmark editor
   if (e.key === 'ArrowLeft' || e.key === 'PageUp') $('prevPage').click();
   else if (e.key === 'ArrowRight' || e.key === 'PageDown') $('nextPage').click();
 });

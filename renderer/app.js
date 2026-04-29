@@ -11,6 +11,7 @@ require('./src/pages');          // navigation + delete + move
 require('./src/text');           // text annotation modal + placed-text overlay
 require('./src/zoom-pan');       // zoom buttons + wheel zoom + pan
 require('./src/bookmarks');      // bookmark modal + sidebar
+require('./src/selection-toolbar'); // floating copy/bookmark bar over text selection
 require('./src/save');           // save PDF
 require('./src/merge');          // merge mode
 

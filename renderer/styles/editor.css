@@ -51,7 +51,13 @@
   overflow: auto;
   background: rgba(0,0,0,0.25);
   border: 1px solid var(--glass-border);
-  display: flex; align-items: flex-start; justify-content: center;
+  /* `safe center` falls back to flex-start when the canvas is wider/taller than
+     the wrap, so the overflow becomes a normal scrollable region (without `safe`
+     the centered layout puts overflow on both sides and scrollLeft can't reach
+     the left overflow → no horizontal scrollbar, no horizontal pan). */
+  display: flex;
+  align-items: safe flex-start;
+  justify-content: safe center;
   padding: 24px;
   position: relative;
 }
@@ -73,6 +79,10 @@ body.text-dragging * {
   box-shadow: 0 12px 40px rgba(0,0,0,0.5);
   border-radius: 4px;
   overflow: hidden;
+  /* Keep our natural pixel width — without this the flex parent shrinks us to
+     fit, the canvas inside gets clipped, and canvas-wrap never sees overflow
+     (no horizontal scrollbar, no horizontal pan). */
+  flex-shrink: 0;
   animation: fadeIn 0.4s var(--ease);
 }
 #pdfCanvas { display: block; background: #fff; }
@@ -227,7 +237,7 @@ body.text-dragging * {
 .text-layer {
   position: absolute; inset: 0;
   overflow: hidden;
-  opacity: 0.2;
+  opacity: 1;                    /* spans are color: transparent — selection bg shows at full alpha */
   line-height: 1;
   pointer-events: auto;
   z-index: 2;
@@ -245,7 +255,54 @@ body.text-dragging * {
   user-select: text !important;
   -webkit-user-select: text !important;
 }
-.text-layer ::selection { background: rgba(167,139,250,0.5); }
+.text-layer ::selection {
+  background: rgba(167,139,250,0.55);
+  color: transparent;            /* keep glyphs invisible — the canvas behind shows through */
+}
+.text-layer ::-moz-selection {
+  background: rgba(167,139,250,0.55);
+  color: transparent;
+}
+
+/* ===== Floating selection toolbar ===== */
+.selection-toolbar {
+  position: fixed;
+  z-index: 50;
+  display: none;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: rgba(20, 20, 32, 0.95);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+  transform: translateX(-50%);
+  pointer-events: auto;
+  user-select: none;
+  animation: selToolbarIn 0.12s var(--ease);
+}
+.selection-toolbar.visible { display: flex; }
+.selection-toolbar .sel-btn {
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+.selection-toolbar .sel-btn:hover {
+  background: rgba(255,255,255,0.1);
+  color: var(--accent);
+}
+.selection-toolbar .sel-btn svg { width: 16px; height: 16px; }
+@keyframes selToolbarIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
 
 /* Panning state */
 .canvas-stage.panning,
@@ -295,6 +352,114 @@ body.text-dragging * {
 .text-overlay .placed-text.dragging .placed-text-del {
   opacity: 1; transform: scale(1);
 }
+/* Inline text editor — appears in place of a modal */
+.text-overlay .inline-text-editor {
+  position: absolute;
+  pointer-events: auto;
+  white-space: pre;
+  outline: 1.5px solid var(--accent);
+  outline-offset: 4px;
+  background: transparent;
+  caret-color: var(--accent);
+  min-width: 1ch;
+  line-height: 1;
+  user-select: text;
+  -webkit-user-select: text;
+  z-index: 4;
+}
+.text-overlay .inline-text-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--fg-mute);
+  opacity: 0.6;
+}
+.text-overlay .inline-text-editor::selection { background: rgba(167,139,250,0.45); }
+
+.text-overlay .inline-text-toolbar {
+  position: absolute;
+  pointer-events: auto;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px;
+  background: rgba(20, 20, 32, 0.92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--fg);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  z-index: 5;
+  user-select: none;
+  white-space: nowrap;
+}
+.inline-text-toolbar .tb-input {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 4px 6px;
+  font-size: 12px;
+  outline: none;
+  font-family: inherit;
+}
+.inline-text-toolbar select.tb-input {
+  padding-right: 4px; cursor: pointer;
+}
+.inline-text-toolbar select.tb-input option {
+  background: #1a1a2e; color: var(--fg);
+}
+.inline-text-toolbar .tb-size {
+  width: 52px;
+  -moz-appearance: textfield;
+}
+.inline-text-toolbar .tb-size::-webkit-inner-spin-button,
+.inline-text-toolbar .tb-size::-webkit-outer-spin-button {
+  -webkit-appearance: none; margin: 0;
+}
+.inline-text-toolbar .tb-color {
+  width: 26px; height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
+}
+.inline-text-toolbar .tb-color::-webkit-color-swatch-wrapper { padding: 2px; }
+.inline-text-toolbar .tb-color::-webkit-color-swatch { border: none; border-radius: 4px; }
+.inline-text-toolbar .tb-btn {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+.inline-text-toolbar .tb-btn:hover {
+  background: rgba(255,255,255,0.08);
+  color: var(--fg);
+}
+.inline-text-toolbar .tb-btn.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+}
+.inline-text-toolbar .tb-style { font-size: 13px; }
+.inline-text-toolbar .tb-done { color: #4ade80; }
+.inline-text-toolbar .tb-done:hover { background: rgba(74,222,128,0.18); color: #4ade80; }
+.inline-text-toolbar .tb-cancel { font-size: 16px; }
+.inline-text-toolbar .tb-cancel:hover { background: #e81123; color: #fff; }
+.inline-text-toolbar .tb-check {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--fg-dim);
+  padding: 0 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.inline-text-toolbar .tb-check input { margin: 0; cursor: pointer; }
+
 .text-overlay .placed-text-badge {
   position: absolute;
   top: -8px; left: -8px;

@@ -53,7 +53,7 @@ document.querySelectorAll('.modal').forEach(m => {
   });
 });
 
-// Escape: closes any open modal, cancels pending text placement
+// Escape: closes any open modal, cancels pending text placement, cancels inline editor
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   closeAllModals();
@@ -61,4 +61,5 @@ window.addEventListener('keydown', (e) => {
     state.pendingTextPlacement = null;
     $('canvasWrap').classList.remove('placing-text');
   }
+  try { require('./text').cancelActiveTextEditor(); } catch (_) {}
 });

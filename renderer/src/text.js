@@ -1,21 +1,43 @@
 'use strict';
-// Text annotations: the modal that captures text + format options, and the placed-text
-// DOM elements that overlay the canvas (with drag-to-move).
-const { $, toast, openModal, closeModal } = require('./dom');
+// Inline text editor: click on the page → editable element with a floating toolbar
+// appears in place. No modal. Existing placed text is editable via double-click.
+const { $, toast } = require('./dom');
 const { state, config } = require('./state');
 const { cssFontFamily } = require('./util');
+
+const FONTS = ['helvetica', 'times', 'courier'];
+const DEFAULT_OPTS = {
+  text: '', font: 'helvetica', size: 14, color: '#111111',
+  bold: false, italic: false, underline: false, repeat: false
+};
+
+let activeEditor = null; // { el, toolbar, ann, isNew, sourceEl, sourceArr, isRepeat }
 
 // ---- Render the placed-text overlay (called after each renderCurrentPage) ----
 function drawTextOverlays() {
   const overlay = $('textOverlay');
+  // Preserve any active inline editor across re-renders.
+  const editorEl = overlay.querySelector('.inline-text-editor');
+  const toolbarEl = overlay.querySelector('.inline-text-toolbar');
+  if (editorEl) editorEl.remove();
+  if (toolbarEl) toolbarEl.remove();
   overlay.innerHTML = '';
+
   const origIdx = state.pageOrder[state.currentPage];
   const perPage = state.textAnnotations
     .filter(a => a.pageOriginalIdx === origIdx)
     .map(a => ({ ann: a, repeat: false }));
   const repeats = state.repeatTexts.map(a => ({ ann: a, repeat: true }));
   for (const { ann, repeat } of [...perPage, ...repeats]) {
+    if (activeEditor && activeEditor.ann === ann) continue; // hidden behind the editor
     overlay.appendChild(makePlacedTextEl(ann, repeat));
+  }
+
+  if (editorEl) overlay.appendChild(editorEl);
+  if (toolbarEl) overlay.appendChild(toolbarEl);
+  if (activeEditor) {
+    positionEditor(activeEditor.el, activeEditor.ann);
+    positionToolbar(activeEditor.toolbar, activeEditor.el);
   }
 }
 
@@ -49,6 +71,11 @@ function makePlacedTextEl(ann, isRepeat) {
   el.appendChild(del);
 
   el.addEventListener('mousedown', (e) => onTextMouseDown(e, el, ann));
+  el.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openEditor({ ann, isRepeat, isNew: false, sourceEl: el });
+  });
   return el;
 }
 
@@ -65,8 +92,8 @@ function positionPlacedText(el, ann) {
 }
 
 function onTextMouseDown(e, el, ann) {
-  // Pending placement takes priority — let the canvas-wrap handler get it
   if (state.pendingTextPlacement) return;
+  if (activeEditor) return;
   if (e.button !== 0) return;
   e.preventDefault();
   e.stopPropagation();
@@ -97,7 +124,15 @@ function onTextMouseDown(e, el, ann) {
   document.addEventListener('mouseup', onUp);
 }
 
-// ---- Place text triggered by the canvas-wrap mousedown handler ----
+// ---- Toolbar entry point: enter placement mode ----
+$('addTextBtn').addEventListener('click', () => {
+  if (activeEditor) commitEditor();
+  state.pendingTextPlacement = { ...DEFAULT_OPTS };
+  $('canvasWrap').classList.add('placing-text');
+  toast('Click on the page to place text');
+});
+
+// Called from zoom-pan.js when canvas-wrap is clicked while pendingTextPlacement is set.
 function placePendingTextAt(clientX, clientY) {
   const p = state.pendingTextPlacement;
   if (!p) return false;
@@ -110,73 +145,299 @@ function placePendingTextAt(clientX, clientY) {
   const ann = {
     x: cx / scale,
     y: cy / scale,
-    text: p.text,
+    text: '',
     size: p.size,
     color: p.color,
-    font: p.font || 'helvetica',
+    font: p.font,
     bold: !!p.bold,
     italic: !!p.italic,
     underline: !!p.underline
   };
-  if (p.repeat) {
-    state.repeatTexts.push(ann);
-  } else {
-    ann.pageOriginalIdx = state.pageOrder[state.currentPage];
-    state.textAnnotations.push(ann);
-  }
   state.pendingTextPlacement = null;
   $('canvasWrap').classList.remove('placing-text');
-  drawTextOverlays();
-  toast('Text added — drag to move, × to remove', 'success');
+  openEditor({ ann, isRepeat: !!p.repeat, isNew: true, sourceEl: null });
   return true;
 }
 
-// ---- Add Text modal wiring ----
-$('addTextBtn').addEventListener('click', () => {
-  $('textInput').value = '';
-  $('textRepeat').checked = false;
-  $('textFont').value = 'helvetica';
-  ['textBold', 'textItalic', 'textUnderline'].forEach(id => $(id).classList.remove('active'));
-  openModal('textModal');
-  setTimeout(() => $('textInput').focus(), 50);
-});
+// ---- Inline editor ----
+function openEditor({ ann, isRepeat, isNew, sourceEl }) {
+  if (activeEditor) commitEditor();
 
-['textBold', 'textItalic', 'textUnderline'].forEach(id => {
-  $(id).addEventListener('click', () => $(id).classList.toggle('active'));
-});
+  const overlay = $('textOverlay');
 
-// Ctrl+B / Ctrl+I / Ctrl+U inside the modal text input
-$('textInput').addEventListener('keydown', (e) => {
-  if (!(e.ctrlKey || e.metaKey)) return;
-  const k = e.key.toLowerCase();
-  const map = { b: 'textBold', i: 'textItalic', u: 'textUnderline' };
-  if (!map[k]) return;
-  e.preventDefault();
-  $(map[k]).classList.toggle('active');
-});
+  const el = document.createElement('div');
+  el.className = 'inline-text-editor';
+  el.contentEditable = 'true';
+  el.spellcheck = false;
+  el.textContent = ann.text || '';
+  applyStyle(el, ann);
+  positionEditor(el, ann);
+  el.addEventListener('mousedown', (e) => e.stopPropagation());
+  el.addEventListener('keydown', onEditorKeydown);
+  el.addEventListener('input', () => {
+    if (activeEditor) positionToolbar(activeEditor.toolbar, el);
+  });
+  el.addEventListener('blur', () => {
+    // Defer so a click on the toolbar (which preventDefaults its mousedown) doesn't
+    // cause a premature commit before the toolbar finishes its action.
+    setTimeout(() => {
+      if (!activeEditor) return;
+      const a = document.activeElement;
+      if (a === activeEditor.el) return;
+      if (activeEditor.toolbar && activeEditor.toolbar.contains(a)) return;
+      commitEditor();
+    }, 0);
+  });
+  overlay.appendChild(el);
 
-$('textCancel').addEventListener('click', () => closeModal('textModal'));
-$('textPlace').addEventListener('click', () => {
-  const text = $('textInput').value.trim();
-  if (!text) { toast('Enter some text', 'error'); return; }
-  state.pendingTextPlacement = {
-    text,
-    size: Math.max(6, Math.min(200, parseInt($('textSize').value, 10) || 14)),
-    color: $('textColor').value,
-    repeat: $('textRepeat').checked,
-    font: $('textFont').value,
-    bold: $('textBold').classList.contains('active'),
-    italic: $('textItalic').classList.contains('active'),
-    underline: $('textUnderline').classList.contains('active')
+  const tb = buildToolbar(ann, isRepeat);
+  overlay.appendChild(tb);
+
+  activeEditor = {
+    el, toolbar: tb, ann, isNew, sourceEl, isRepeat,
+    sourceArr: isNew ? null : (isRepeat ? state.repeatTexts : state.textAnnotations)
   };
-  closeModal('textModal');
-  $('canvasWrap').classList.add('placing-text');
-  toast(state.pendingTextPlacement.repeat
-    ? 'Click to place — text will repeat on every page'
-    : 'Click on the page to place text');
-});
+  if (sourceEl) sourceEl.style.visibility = 'hidden';
 
-// Refresh the placed-text overlay whenever a page is rendered
+  positionToolbar(tb, el);
+  el.focus();
+  // Caret at end
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function positionEditor(el, ann) {
+  const scale = state.zoom;
+  el.style.left = (ann.x * scale) + 'px';
+  el.style.top = (ann.y * scale) + 'px';
+  el.style.fontSize = (ann.size * scale) + 'px';
+}
+
+function applyStyle(el, ann) {
+  el.style.color = ann.color;
+  el.style.fontFamily = cssFontFamily(ann.font || 'helvetica');
+  el.style.fontWeight = ann.bold ? '700' : '400';
+  el.style.fontStyle = ann.italic ? 'italic' : 'normal';
+  el.style.textDecoration = ann.underline ? 'underline' : 'none';
+}
+
+function buildToolbar(ann, isRepeat) {
+  const tb = document.createElement('div');
+  tb.className = 'inline-text-toolbar';
+  // Don't blur the editor when interacting with toolbar widgets.
+  tb.addEventListener('mousedown', (e) => {
+    if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'SELECT') {
+      e.preventDefault();
+    }
+  });
+
+  const fontSel = document.createElement('select');
+  fontSel.className = 'tb-input';
+  for (const f of FONTS) {
+    const o = document.createElement('option');
+    o.value = f; o.textContent = f.charAt(0).toUpperCase() + f.slice(1);
+    fontSel.appendChild(o);
+  }
+  fontSel.value = ann.font || 'helvetica';
+  fontSel.addEventListener('change', () => {
+    if (!activeEditor) return;
+    activeEditor.ann.font = fontSel.value;
+    applyStyle(activeEditor.el, activeEditor.ann);
+    activeEditor.el.focus();
+  });
+
+  const sizeInput = document.createElement('input');
+  sizeInput.type = 'number';
+  sizeInput.className = 'tb-input tb-size';
+  sizeInput.min = 6; sizeInput.max = 200;
+  sizeInput.value = ann.size;
+  sizeInput.addEventListener('input', () => {
+    if (!activeEditor) return;
+    const v = Math.max(6, Math.min(200, parseInt(sizeInput.value, 10) || 14));
+    activeEditor.ann.size = v;
+    activeEditor.el.style.fontSize = (v * state.zoom) + 'px';
+    positionToolbar(activeEditor.toolbar, activeEditor.el);
+  });
+
+  const colorInput = document.createElement('input');
+  colorInput.type = 'color';
+  colorInput.className = 'tb-input tb-color';
+  colorInput.value = ann.color;
+  colorInput.addEventListener('input', () => {
+    if (!activeEditor) return;
+    activeEditor.ann.color = colorInput.value;
+    activeEditor.el.style.color = colorInput.value;
+  });
+
+  const styleDefs = [
+    { key: 'bold', label: 'B', extra: 'font-weight:700', title: 'Bold (Ctrl+B)' },
+    { key: 'italic', label: 'I', extra: 'font-style:italic;font-family:serif', title: 'Italic (Ctrl+I)' },
+    { key: 'underline', label: 'U', extra: 'text-decoration:underline', title: 'Underline (Ctrl+U)' }
+  ];
+  const styleBtns = styleDefs.map(s => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tb-btn tb-style';
+    btn.dataset.styleKey = s.key;
+    btn.textContent = s.label;
+    btn.setAttribute('style', s.extra);
+    btn.title = s.title;
+    if (ann[s.key]) btn.classList.add('active');
+    btn.addEventListener('click', () => {
+      if (!activeEditor) return;
+      const on = !btn.classList.contains('active');
+      btn.classList.toggle('active', on);
+      activeEditor.ann[s.key] = on;
+      applyStyle(activeEditor.el, activeEditor.ann);
+      activeEditor.el.focus();
+    });
+    return btn;
+  });
+
+  const repeatLabel = document.createElement('label');
+  repeatLabel.className = 'tb-check';
+  repeatLabel.title = 'Repeat on every page (header / footer)';
+  const repeatCb = document.createElement('input');
+  repeatCb.type = 'checkbox';
+  repeatCb.checked = isRepeat;
+  const repText = document.createElement('span');
+  repText.textContent = 'Repeat';
+  repeatLabel.append(repeatCb, repText);
+  repeatCb.addEventListener('change', () => {
+    if (!activeEditor) return;
+    activeEditor.isRepeat = repeatCb.checked;
+  });
+
+  const doneBtn = document.createElement('button');
+  doneBtn.type = 'button';
+  doneBtn.className = 'tb-btn tb-done';
+  doneBtn.title = 'Done (Enter)';
+  doneBtn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  doneBtn.addEventListener('click', () => commitEditor());
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'tb-btn tb-cancel';
+  cancelBtn.title = 'Cancel (Esc)';
+  cancelBtn.textContent = '×';
+  cancelBtn.addEventListener('click', () => cancelEditor());
+
+  tb.append(fontSel, sizeInput, colorInput, ...styleBtns, repeatLabel, doneBtn, cancelBtn);
+  return tb;
+}
+
+function positionToolbar(tb, editorEl) {
+  if (!tb || !editorEl) return;
+  const overlay = $('textOverlay');
+  const ow = overlay.clientWidth;
+  const editorTop = parseFloat(editorEl.style.top) || 0;
+  const editorLeft = parseFloat(editorEl.style.left) || 0;
+  const editorH = editorEl.offsetHeight || 24;
+  const tbW = tb.offsetWidth || 320;
+  const tbH = tb.offsetHeight || 36;
+  let top = editorTop - tbH - 10;
+  if (top < 0) top = editorTop + editorH + 10;
+  let left = editorLeft;
+  if (left + tbW > ow) left = Math.max(0, ow - tbW - 4);
+  if (left < 0) left = 0;
+  tb.style.top = top + 'px';
+  tb.style.left = left + 'px';
+}
+
+function onEditorKeydown(e) {
+  if (!activeEditor) return;
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    commitEditor();
+    return;
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    cancelEditor();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey) {
+    const k = e.key.toLowerCase();
+    if (k === 'b' || k === 'i' || k === 'u') {
+      e.preventDefault();
+      const map = { b: 'bold', i: 'italic', u: 'underline' };
+      const key = map[k];
+      const on = !activeEditor.ann[key];
+      activeEditor.ann[key] = on;
+      applyStyle(activeEditor.el, activeEditor.ann);
+      const btn = activeEditor.toolbar.querySelector(`.tb-style[data-style-key="${key}"]`);
+      if (btn) btn.classList.toggle('active', on);
+    }
+  }
+}
+
+function commitEditor() {
+  if (!activeEditor) return;
+  const { el, toolbar, ann, isNew, sourceEl, sourceArr, isRepeat } = activeEditor;
+  const text = (el.innerText || '').replace(/\s+$/g, '').trim();
+  el.remove();
+  toolbar.remove();
+  activeEditor = null;
+
+  if (!text) {
+    if (!isNew && sourceArr) {
+      const idx = sourceArr.indexOf(ann);
+      if (idx >= 0) sourceArr.splice(idx, 1);
+      toast('Text removed');
+    }
+    drawTextOverlays();
+    return;
+  }
+
+  ann.text = text;
+  if (isNew) {
+    if (isRepeat) {
+      delete ann.pageOriginalIdx;
+      state.repeatTexts.push(ann);
+    } else {
+      ann.pageOriginalIdx = state.pageOrder[state.currentPage];
+      state.textAnnotations.push(ann);
+    }
+    toast('Text added — drag to move, double-click to edit', 'success');
+  } else {
+    const wasRepeat = sourceArr === state.repeatTexts;
+    if (wasRepeat !== isRepeat) {
+      const fromArr = wasRepeat ? state.repeatTexts : state.textAnnotations;
+      const idx = fromArr.indexOf(ann);
+      if (idx >= 0) fromArr.splice(idx, 1);
+      if (isRepeat) {
+        delete ann.pageOriginalIdx;
+        state.repeatTexts.push(ann);
+      } else {
+        ann.pageOriginalIdx = state.pageOrder[state.currentPage];
+        state.textAnnotations.push(ann);
+      }
+    }
+  }
+  drawTextOverlays();
+}
+
+function cancelEditor() {
+  if (!activeEditor) return;
+  const { el, toolbar, sourceEl } = activeEditor;
+  el.remove();
+  toolbar.remove();
+  if (sourceEl) sourceEl.style.visibility = '';
+  activeEditor = null;
+}
+
+function isEditorActive() { return !!activeEditor; }
+
 window.addEventListener('pdf:page-rendered', drawTextOverlays);
 
-module.exports = { drawTextOverlays, placePendingTextAt };
+module.exports = {
+  drawTextOverlays,
+  placePendingTextAt,
+  isEditorActive,
+  cancelActiveTextEditor: cancelEditor,
+  commitActiveTextEditor: commitEditor
+};

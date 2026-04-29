@@ -5,6 +5,7 @@ const { $ } = require('./dom');
 const { state, config } = require('./state');
 const { renderCurrentPage } = require('./viewer');
 const { placePendingTextAt } = require('./text');
+const { gotoPage } = require('./pages');
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -33,6 +34,39 @@ window.addEventListener('pdf:wheel-zoom', (e) => {
     : clamp(state.zoom - step, config.ZOOM_MIN, config.ZOOM_MAX);
   renderCurrentPage();
 });
+
+// ---- Wheel scroll (within page) + page-flip at boundary ----
+// Scrolls the canvas-wrap when the page overflows; when the user wheels past the
+// top/bottom edge, flip to prev/next page. Cooldown prevents a single tick from
+// double-firing right at the boundary.
+let lastFlipAt = 0;
+$('canvasWrap').addEventListener('wheel', (e) => {
+  if (e.ctrlKey || e.metaKey) return;          // chrome.js handles zoom
+  if (state.gridMode) return;                   // grid scrolls natively
+  const wrap = e.currentTarget;
+  const dir = Math.sign(e.deltaY);
+  if (!dir) return;
+
+  const canScroll = wrap.scrollHeight > wrap.clientHeight;
+  const atTop = wrap.scrollTop <= 0;
+  const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 1;
+  const atEdge = (dir > 0 && atBottom) || (dir < 0 && atTop);
+
+  if (canScroll && !atEdge) return;             // let the browser scroll the page
+
+  const now = Date.now();
+  if (now - lastFlipAt < 250) { e.preventDefault(); return; }
+  const target = state.currentPage + dir;
+  if (target < 0 || target >= state.pageOrder.length) return;
+  e.preventDefault();
+  lastFlipAt = now;
+  gotoPage(target).then(() => {
+    // Land at the opposite edge so continuing to wheel feels continuous
+    const w = $('canvasWrap');
+    if (dir < 0) w.scrollTop = Math.max(0, w.scrollHeight - w.clientHeight);
+    else w.scrollTop = 0;
+  });
+}, { passive: false });
 
 // ---- Pan ----
 function startPan(e) {

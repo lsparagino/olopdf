@@ -1,6 +1,6 @@
 {
   "name": "pdf-editor",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Modern, portable PDF editor — curated by Olopad",
   "main": "main.js",
   "author": {

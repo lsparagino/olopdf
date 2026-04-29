@@ -41,6 +41,8 @@ function movePage(src, dest) {
   renderThumbnails();
   if (state.gridMode) renderGridView();
   renderCurrentPage();
+  // Bookmark display order tracks page order — refresh the sidebar.
+  window.dispatchEvent(new CustomEvent('pdf:bookmarks-changed'));
 }
 
 // Wire page navigation buttons

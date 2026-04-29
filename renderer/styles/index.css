@@ -1,0 +1,8 @@
+/* Entry stylesheet — imports modules in the right cascading order. */
+@import url("./base.css");
+@import url("./background.css");
+@import url("./chrome.css");
+@import url("./components.css");
+@import url("./welcome.css");
+@import url("./editor.css");
+@import url("./merge.css");

@@ -12,7 +12,40 @@ There is no lint config, test runner, or type checker in this project. Don't inv
 
 ## Architecture
 
-A frameless Electron app: one main process (`main.js`), one renderer (`renderer/index.html` + `app.js` + `styles.css`). `nodeIntegration: true, contextIsolation: false` — the renderer uses `require()` directly. Don't introduce a preload bridge unless the threat model changes.
+A frameless Electron app: one main process (`main.js`), one renderer split into modules under `renderer/src/` and stylesheets under `renderer/styles/`. `nodeIntegration: true, contextIsolation: false` — the renderer uses `require()` directly. Don't introduce a preload bridge unless the threat model changes.
+
+### Renderer module layout
+
+`renderer/app.js` is a thin entry that requires each feature module in dependency order. Each module wires up its own DOM listeners on import.
+
+| Module | Responsibility |
+|---|---|
+| `state.js` | Singleton `state` object + frozen `config` constants |
+| `dom.js` | `$`, `toast`, modal/loading helpers, `showScreen` + `onScreenChange` listeners |
+| `util.js` | Pure utilities: `hexToRgb01`, `cssFontFamily`, `pickStandardFont`, `formatBytes` |
+| `pdf-engine.js` | pdf.js worker setup (Blob URL — survives asar) |
+| `chrome.js` | Window controls, capture-phase Ctrl+= / Ctrl+wheel intercept, escape, modal bg close |
+| `welcome.js` | Welcome screen, drop zone, file open, recents, curator link, version display |
+| `viewer.js` | `renderCurrentPage` + `renderTextLayer` (manual). Emits `pdf:page-rendered` |
+| `thumbnails.js` | Sidebar thumbs + grid view. Shared `paintThumb` and `buildThumb` helpers (DRY) |
+| `pages.js` | `gotoPage`, `deletePage`, `movePage`, prev/next, keyboard nav, resize re-fit |
+| `text.js` | Add-text modal + placed-text overlay + drag. Exports `placePendingTextAt` |
+| `zoom-pan.js` | Zoom buttons + wheel-zoom event listener + pan + canvas-wrap mousedown orchestration |
+| `bookmarks.js` | Bookmark modal, sidebar list, selection capture, `gotoBookmark` |
+| `save.js` | Output PDF assembly: copy, draw text, repeat, build outline |
+| `merge.js` | Merge mode (drop, drag-reorder, output) |
+
+### Cross-module communication
+
+Modules avoid direct cycles via two mechanisms:
+
+1. **Custom events on `window`**:
+   - `pdf:page-rendered` — emitted by `viewer.js` after each page render. `text.js` redraws the placed-text overlay; `thumbnails.js` re-highlights the active thumb.
+   - `pdf:wheel-zoom` — emitted by `chrome.js`, handled by `zoom-pan.js` (so chrome doesn't have to import zoom logic).
+   - `pdf:bookmarks-changed` — emitted by `pages.js` after a delete that may purge bookmarks; `bookmarks.js` re-renders.
+2. **Lazy `require()`** inside function bodies for the few real cycles (e.g. `thumbnails.js` lazily requires `pages.js` from inside drag handlers, `welcome.js` lazily loads viewer/thumb/bookmark modules from `loadPdfBytes`). The cycle resolves at call time, not module-load time.
+
+Prefer events for fan-out notifications, lazy require only when the dependency is genuinely circular.
 
 ### Two PDF libraries, two purposes
 - **pdf.js (`pdfjs-dist/legacy/build/pdf.js`)** — rendering only (canvas + text-extraction for the selectable text layer). Worker is loaded by reading `pdf.worker.js` from `node_modules` with `fs.readFileSync` and wrapping it as a `Blob` URL — this works in dev and in the packaged asar. Don't replace it with a path-based `workerSrc`; that breaks under asar.

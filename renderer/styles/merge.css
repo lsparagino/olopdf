@@ -1,0 +1,80 @@
+/* Merge screen: drag-and-drop list of PDFs to combine. */
+
+.merge { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+.merge-header {
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 4px;
+}
+.merge-header h2 {
+  flex: 1;
+  font-size: 18px; font-weight: 600; letter-spacing: -0.3px;
+  background: linear-gradient(135deg, #fff, #c4b5fd);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+
+.merge-body {
+  flex: 1;
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex; flex-direction: column; gap: 12px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.2s var(--ease);
+}
+.merge-body.dragover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(167,139,250,0.2);
+}
+
+.merge-list {
+  display: flex; flex-direction: column; gap: 8px;
+  overflow-y: auto;
+  flex: 1;
+}
+.merge-empty {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; color: var(--fg-dim);
+  pointer-events: none;
+  transition: opacity 0.2s var(--ease);
+}
+.merge-empty p { font-size: 14px; }
+.merge-empty .hint { font-size: 12px; color: var(--fg-mute); }
+.merge-list:not(:empty) ~ .merge-empty { opacity: 0; }
+
+.merge-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  transition: transform 0.15s var(--ease),
+              border-color 0.15s var(--ease),
+              background 0.15s var(--ease);
+  animation: thumbIn 0.3s var(--ease) both;
+}
+.merge-item:hover {
+  border-color: var(--glass-border-strong);
+  background: rgba(255,255,255,0.10);
+}
+.merge-item.dragging { opacity: 0.4; cursor: grabbing; }
+.merge-item.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.merge-item.drop-after  { box-shadow: 0  2px 0 0 var(--accent); }
+.merge-item .grip { color: var(--fg-mute); cursor: grab; }
+.merge-item .name {
+  flex: 1; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.merge-item .meta { color: var(--fg-mute); font-size: 11px; }
+.merge-item .remove {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: var(--fg-dim);
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+  font-size: 16px; line-height: 1;
+}
+.merge-item .remove:hover { background: #e81123; color: #fff; }

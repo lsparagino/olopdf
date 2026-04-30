@@ -25,8 +25,16 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.join(here, '..')
 const pkgPath = path.join(root, 'package.json')
 
+// Only npm/npx/gh ship as .cmd shims on Windows, which require shell:true to
+// invoke. Direct .exe binaries (git, node) must NOT use shell — cmd.exe
+// argument parsing mangles colons, parens, and quotes inside our messages.
+const SHELL_SHIMS = /^(npm|npx|yarn|pnpm|gh)$/
+function needsShell(cmd) {
+  return process.platform === 'win32' && SHELL_SHIMS.test(cmd)
+}
+
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, { stdio: 'inherit', cwd: root, shell: process.platform === 'win32', ...opts })
+  const res = spawnSync(cmd, args, { stdio: 'inherit', cwd: root, shell: needsShell(cmd), ...opts })
   if (res.status !== 0) {
     console.error(`\n[release] command failed: ${cmd} ${args.join(' ')}`)
     process.exit(res.status ?? 1)
@@ -34,7 +42,7 @@ function run(cmd, args, opts = {}) {
 }
 
 function capture(cmd, args) {
-  const res = spawnSync(cmd, args, { cwd: root, shell: process.platform === 'win32', encoding: 'utf-8' })
+  const res = spawnSync(cmd, args, { cwd: root, shell: needsShell(cmd), encoding: 'utf-8' })
   if (res.status !== 0) {
     console.error(res.stderr)
     process.exit(res.status ?? 1)
@@ -43,7 +51,7 @@ function capture(cmd, args) {
 }
 
 function tryGhToken() {
-  const res = spawnSync('gh', ['auth', 'token'], { shell: process.platform === 'win32', encoding: 'utf-8' })
+  const res = spawnSync('gh', ['auth', 'token'], { shell: needsShell('gh'), encoding: 'utf-8' })
   if (res.status !== 0) return null
   const token = res.stdout.trim()
   return token || null

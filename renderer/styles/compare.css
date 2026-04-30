@@ -1,0 +1,249 @@
+/* Compare screen: two side-by-side PDFs with diff highlights, git-diff style. */
+
+.compare {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+/* ===== Header ===== */
+.compare-header {
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 4px;
+}
+.compare-header h2 {
+  flex: 1;
+  font-size: 18px; font-weight: 600; letter-spacing: -0.3px;
+  background: linear-gradient(135deg, #fff, #c4b5fd);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+.compare-options { display: flex; align-items: center; gap: 14px; }
+
+.dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.dot.left  { background: #ef4444; box-shadow: 0 0 0 2px rgba(239,68,68,0.18); }
+.dot.right { background: #22c55e; box-shadow: 0 0 0 2px rgba(34,197,94,0.18); }
+
+#compareSwapBtn:disabled { opacity: 0.35; }
+#compareSwapBtn { width: 32px; height: 32px; }
+
+/* ===== Summary bar (after a comparison runs) ===== */
+.compare-summary {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  animation: thumbIn 0.3s var(--ease);
+}
+.diff-stats { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.diff-stat {
+  font-size: 12px;
+  color: var(--fg-dim);
+  display: inline-flex; align-items: center; gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.diff-stat .dash {
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.diff-stat.removed { color: #fca5a5; }
+.diff-stat.added   { color: #86efac; }
+.diff-stat.changed { color: var(--fg); }
+.diff-jump { display: flex; gap: 6px; }
+
+/* ===== Body: two side-by-side panes ===== */
+.compare-body {
+  flex: 1 1 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  min-height: 0;
+  position: relative;             /* host for the connector SVG */
+}
+
+/* Connector lines linking matched diff hunks across the two panes.
+   Spans the whole body; pointer-events: none so it never blocks clicks. */
+.compare-connectors {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  z-index: 5;
+  overflow: visible;
+}
+.compare-connectors path {
+  fill: none;
+  stroke-width: 1.5;
+  opacity: 0.7;
+}
+.compare-connectors path.changed { stroke: rgba(250, 204, 21, 0.9); }
+.compare-connectors path.removed { stroke: rgba(239,  68,  68, 0.7); stroke-dasharray: 4 3; }
+.compare-connectors path.added   { stroke: rgba( 34, 197,  94, 0.7); stroke-dasharray: 4 3; }
+.compare-pane {
+  border-radius: var(--radius);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  min-height: 0; min-width: 0;
+}
+.compare-pane-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  font-size: 12px; font-weight: 600;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  color: var(--fg-dim);
+}
+.compare-pane-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg);
+}
+
+.compare-canvas-wrap {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  background: rgba(0,0,0,0.25);
+  display: flex;
+  align-items: safe flex-start;
+  justify-content: safe center;
+  padding: 16px;
+  position: relative;
+  transition: background 0.15s var(--ease);
+}
+
+/* ===== Empty pane: full drop zone replaces the canvas stage ===== */
+.compare-pane.empty .compare-stage { display: none; }
+.compare-pane.empty .compare-canvas-wrap {
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+}
+.compare-pane.empty .compare-canvas-wrap:hover .compare-dropzone {
+  border-color: var(--glass-border-strong);
+  color: var(--fg);
+  background: rgba(255,255,255,0.04);
+}
+.compare-pane.empty .compare-canvas-wrap.dragover {
+  background: rgba(167,139,250,0.06);
+}
+.compare-pane.empty .compare-canvas-wrap.dragover .compare-dropzone {
+  border-color: var(--accent);
+  color: var(--fg);
+  background: rgba(167,139,250,0.10);
+  transform: scale(1.01);
+}
+/* By default the dropzone is suppressed — only the empty pane shows it. */
+.compare-pane:not(.empty) .compare-dropzone { display: none; }
+.compare-dropzone {
+  position: absolute;
+  inset: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 2px dashed var(--glass-border);
+  border-radius: var(--radius);
+  color: var(--fg-mute);
+  text-align: center;
+  pointer-events: none;        /* the wrap is the interactive surface */
+  transition: border-color 0.18s var(--ease), background 0.18s var(--ease),
+              color 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.compare-dropzone svg { opacity: 0.7; }
+.compare-dropzone .dz-title { font-size: 14px; font-weight: 500; }
+.compare-dropzone .dz-title strong { color: var(--fg); font-weight: 600; }
+.compare-dropzone .dz-hint  { font-size: 12px; color: var(--fg-mute); }
+.compare-stage {
+  position: relative;
+  flex-shrink: 0;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+  border-radius: 4px;
+  overflow: hidden;
+  animation: fadeIn 0.3s var(--ease);
+}
+.compare-stage canvas { display: block; background: #fff; }
+
+/* Highlight overlay: absolute boxes drawn over the canvas */
+.compare-overlay {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.compare-overlay .diff-box {
+  position: absolute;
+  border-radius: 2px;
+  animation: diffPulse 0.6s var(--ease);
+}
+.compare-overlay .diff-box.removed {
+  background: rgba(239, 68, 68, 0.28);
+  outline: 1px solid rgba(239, 68, 68, 0.7);
+}
+.compare-overlay .diff-box.added {
+  background: rgba(34, 197, 94, 0.28);
+  outline: 1px solid rgba(34, 197, 94, 0.7);
+}
+.compare-overlay .diff-box.changed {
+  background: rgba(250, 204, 21, 0.22);
+  outline: 1px solid rgba(250, 204, 21, 0.55);
+}
+@keyframes diffPulse {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.compare-empty-page {
+  position: absolute; inset: 0;
+  display: none;
+  align-items: center; justify-content: center;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255,255,255,0.02),
+    rgba(255,255,255,0.02) 10px,
+    rgba(255,255,255,0.04) 10px,
+    rgba(255,255,255,0.04) 20px
+  );
+  color: var(--fg-mute);
+  font-size: 13px;
+  font-style: italic;
+  border: 1px dashed var(--glass-border);
+  border-radius: 4px;
+  z-index: 3;
+}
+.compare-stage.empty .compare-empty-page { display: flex; }
+.compare-stage.empty canvas { visibility: hidden; }
+.compare-stage.empty.removed-side { background: rgba(239, 68, 68, 0.10); }
+.compare-stage.empty.added-side   { background: rgba(34, 197, 94, 0.10); }
+
+/* Highlight a pane that is the only one with content for a given page */
+.compare-pane.unmatched .compare-pane-header { color: #fca5a5; }
+.compare-pane.unmatched.added .compare-pane-header { color: #86efac; }
+
+/* Pane status badges (per-page) */
+#compareLeftStatus.added,
+#compareRightStatus.added   { color: #86efac; border-color: rgba(34,197,94,0.4); }
+#compareLeftStatus.removed,
+#compareRightStatus.removed { color: #fca5a5; border-color: rgba(239,68,68,0.4); }
+#compareLeftStatus.changed,
+#compareRightStatus.changed { color: #fde68a; border-color: rgba(250,204,21,0.4); }
+#compareLeftStatus.same,
+#compareRightStatus.same    { color: var(--fg-mute); }
+
+/* ===== Bottom nav ===== */
+.compare-nav {
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  display: flex; align-items: center; gap: 10px;
+  justify-content: center;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 900px) {
+  .compare-body { grid-template-columns: 1fr; }
+}

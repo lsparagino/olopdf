@@ -71,6 +71,10 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
               Merge PDFs
             </button>
+            <button class="btn" id="compareBtn">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+              Compare PDFs
+            </button>
           </div>
         </div>
         <div class="recents glass" id="recents" style="display:none">
@@ -191,6 +195,105 @@
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Add PDF
         </button>
+      </div>
+    </section>
+
+    <!-- Compare screen -->
+    <section id="compare" class="screen compare">
+      <div class="compare-header">
+        <button class="btn ghost small" id="compareBackBtn">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+          Home
+        </button>
+        <h2>Compare PDFs</h2>
+        <div class="compare-options">
+          <button class="btn ghost icon" id="compareSwapBtn" title="Swap sides" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          </button>
+          <label class="form-check" title="Compare only the text content, ignoring visual rendering">
+            <input type="checkbox" id="compareTextOnly" checked>
+            <span>Text only</span>
+          </label>
+          <button class="btn primary small" id="compareRunBtn" disabled>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            Compare
+          </button>
+        </div>
+      </div>
+
+      <div class="compare-summary glass" id="compareSummary" style="display:none">
+        <div class="diff-stats">
+          <span class="diff-stat removed"><span class="dash">−</span><span id="compareRemovedCount">0</span> removed</span>
+          <span class="diff-stat added"><span class="dash">+</span><span id="compareAddedCount">0</span> added</span>
+          <span class="diff-stat changed"><span id="compareChangedPages">0</span> changed pages</span>
+        </div>
+        <div class="diff-jump">
+          <button class="btn ghost small" id="comparePrevDiffBtn" title="Previous difference">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            Prev diff
+          </button>
+          <button class="btn ghost small" id="compareNextDiffBtn" title="Next difference">
+            Next diff
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="compare-body" id="compareBody">
+        <div class="compare-pane glass empty" id="compareLeftPane">
+          <div class="compare-pane-header">
+            <span class="dot left"></span>
+            <span class="compare-pane-name" id="compareLeftHeader">Original</span>
+            <span class="badge" id="compareLeftStatus" style="display:none">—</span>
+          </div>
+          <div class="compare-canvas-wrap" id="compareLeftWrap">
+            <div class="compare-stage" id="compareLeftStage">
+              <canvas id="compareLeftCanvas"></canvas>
+              <div class="compare-overlay" id="compareLeftOverlay"></div>
+              <div class="compare-empty-page" id="compareLeftEmpty" style="display:none">No page</div>
+            </div>
+            <div class="compare-dropzone" data-side="left">
+              <svg viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <p class="dz-title">Drop the <strong>original</strong> PDF here</p>
+              <p class="dz-hint">or click to browse</p>
+            </div>
+          </div>
+        </div>
+        <div class="compare-pane glass empty" id="compareRightPane">
+          <div class="compare-pane-header">
+            <span class="dot right"></span>
+            <span class="compare-pane-name" id="compareRightHeader">Revised</span>
+            <span class="badge" id="compareRightStatus" style="display:none">—</span>
+          </div>
+          <div class="compare-canvas-wrap" id="compareRightWrap">
+            <div class="compare-stage" id="compareRightStage">
+              <canvas id="compareRightCanvas"></canvas>
+              <div class="compare-overlay" id="compareRightOverlay"></div>
+              <div class="compare-empty-page" id="compareRightEmpty" style="display:none">No page</div>
+            </div>
+            <div class="compare-dropzone" data-side="right">
+              <svg viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <p class="dz-title">Drop the <strong>revised</strong> PDF here</p>
+              <p class="dz-hint">or click to browse</p>
+            </div>
+          </div>
+        </div>
+        <svg class="compare-connectors" id="compareConnectors" preserveAspectRatio="none"></svg>
+      </div>
+
+      <div class="compare-nav glass" id="compareNav" style="display:none">
+        <button class="btn icon" id="comparePrevPage" title="Previous page">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span class="page-indicator"><span id="compareCurPage">1</span> / <span id="compareTotalPages">1</span></span>
+        <button class="btn icon" id="compareNextPage" title="Next page">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <span class="divider"></span>
+        <button class="btn icon" id="compareZoomOut" title="Zoom out">−</button>
+        <span id="compareZoomLabel" class="zoom-label">100%</span>
+        <button class="btn icon" id="compareZoomIn" title="Zoom in">+</button>
+        <button class="btn icon" id="compareZoomFit" title="Fit to page">⤢</button>
       </div>
     </section>
   </div>

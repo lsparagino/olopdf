@@ -25,6 +25,9 @@ $('mergeBtn').addEventListener('click', () => {
   require('./merge').renderMergeList();
   showScreen('merge');
 });
+$('compareBtn').addEventListener('click', () => {
+  showScreen('compare');
+});
 $('backBtn').addEventListener('click', () => {
   if (state.gridMode) {
     require('./thumbnails').toggleGridMode(false);

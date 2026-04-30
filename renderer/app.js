@@ -14,6 +14,7 @@ require('./src/bookmarks');      // bookmark modal + sidebar
 require('./src/selection-toolbar'); // floating copy/bookmark bar over text selection
 require('./src/save');           // save PDF
 require('./src/merge');          // merge mode
+require('./src/compare');        // compare mode (side-by-side diff)
 
 const { showScreen } = require('./src/dom');
 showScreen('welcome');

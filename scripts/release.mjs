@@ -117,4 +117,4 @@ console.log('[release] pushing commit + tag…')
 run('git', ['push', '--follow-tags'])
 
 console.log(`\n[release] Done. v${version} draft release uploaded to GitHub.`)
-console.log('[release] Visit https://github.com/lsparagino/pdf-editor/releases — review and publish the draft to roll out auto-updates.')
+console.log('[release] Visit https://github.com/lsparagino/olopdf/releases — review and publish the draft to roll out auto-updates.')

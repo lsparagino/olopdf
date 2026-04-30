@@ -200,5 +200,5 @@ ipcMain.on('update:install', () => {
   autoUpdater.quitAndInstall();
 });
 ipcMain.on('update:open-releases', () => {
-  shell.openExternal('https://github.com/lsparagino/pdf-editor/releases/latest');
+  shell.openExternal('https://github.com/lsparagino/olopdf/releases/latest');
 });

@@ -51,7 +51,7 @@ The script:
 - uploads them as a **draft** GitHub Release with a `latest.yml` manifest
 - commits the version bump, tags `vX.Y.Z`, and pushes
 
-Visit `https://github.com/lsparagino/pdf-editor/releases`, review the draft, and click **Publish release**. NSIS-installed clients pick up the update on next launch.
+Visit `https://github.com/lsparagino/olopdf/releases`, review the draft, and click **Publish release**. NSIS-installed clients pick up the update on next launch.
 
 ## Keyboard shortcuts
 

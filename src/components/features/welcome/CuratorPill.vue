@@ -15,7 +15,7 @@ function go(e: MouseEvent) {
   <a
     href="#"
     class="curator self-center"
-    :title="`curated by Olopad — ${PDF_CONFIG.CURATOR_URL.replace(/^https?:\/\//, '')}`"
+    :title="`powered by Olopad — ${PDF_CONFIG.CURATOR_URL.replace(/^https?:\/\//, '')}`"
     @click="go"
   >
     <span
@@ -30,7 +30,7 @@ function go(e: MouseEvent) {
       </svg>
     </span>
     <span class="flex flex-col leading-[1.1]">
-      <span class="text-[9px] uppercase tracking-[0.7px] text-fg-mute">curated by</span>
+      <span class="text-[9px] uppercase tracking-[0.7px] text-fg-mute">powered by</span>
       <span class="text-sm font-semibold tracking-[-0.3px] text-white">olopad</span>
     </span>
     <span

@@ -24,6 +24,15 @@ export interface Hunk {
   kind: DiffKind
   leftBoxes: DiffBox[]
   rightBoxes: DiffBox[]
+  /**
+   * Y-position (PDF user space) on the left page where this change attaches in
+   * document order — bottom of the surviving match that immediately precedes the
+   * hunk. For pure-add hunks this is the insertion point on the left; for changes
+   * spanning both sides it's just informational. Undefined when the hunk extends
+   * to the very start of the document (no preceding match exists).
+   */
+  leftAnchorY?: number
+  rightAnchorY?: number
 }
 
 /**
@@ -39,6 +48,9 @@ export interface HunkGroup {
   rightBoxes: DiffBox[]
   leftText: string
   rightText: string
+  /** Insertion/deletion attach point on each side — see Hunk.leftAnchorY. */
+  leftAnchorY?: number
+  rightAnchorY?: number
 }
 
 export interface PageDiff {
@@ -151,6 +163,12 @@ export function groupHunks(hunks: Hunk[]): HunkGroup[] {
         if (last.leftBoxes.length && last.rightBoxes.length) last.kind = 'changed'
         last.leftText = joinText(last.leftBoxes)
         last.rightText = joinText(last.rightBoxes)
+        // Anchors: keep the earliest (the first hunk's anchor sets where the change
+        // attaches in document order; later hunks merging in are continuations).
+        if (last.leftAnchorY === undefined && h.leftAnchorY !== undefined)
+          last.leftAnchorY = h.leftAnchorY
+        if (last.rightAnchorY === undefined && h.rightAnchorY !== undefined)
+          last.rightAnchorY = h.rightAnchorY
         continue
       }
     }
@@ -161,6 +179,8 @@ export function groupHunks(hunks: Hunk[]): HunkGroup[] {
       rightBoxes: [...h.rightBoxes],
       leftText: joinText(h.leftBoxes),
       rightText: joinText(h.rightBoxes),
+      leftAnchorY: h.leftAnchorY,
+      rightAnchorY: h.rightAnchorY,
     })
   }
 
@@ -227,7 +247,19 @@ function lcsDiffHunks(L: TextItem[], R: TextItem[], Ln: string[], Rn: string[]):
     cur.leftBoxes.reverse()
     cur.rightBoxes.reverse()
     if (cur.leftBoxes.length || cur.rightBoxes.length) {
-      hunks.push({ kind: hunkKind(cur), leftBoxes: cur.leftBoxes, rightBoxes: cur.rightBoxes })
+      // Anchors: walking backward, when we close a hunk we've just hit the
+      // surviving match that precedes this hunk in document order. Its bottom Y
+      // is where the change "attaches" on each side — used downstream to position
+      // the wedge collapse point and the insertion/deletion line.
+      const leftAnchorY = i > 0 ? L[i - 1].y + L[i - 1].h : 0
+      const rightAnchorY = j > 0 ? R[j - 1].y + R[j - 1].h : 0
+      hunks.push({
+        kind: hunkKind(cur),
+        leftBoxes: cur.leftBoxes,
+        rightBoxes: cur.rightBoxes,
+        leftAnchorY,
+        rightAnchorY,
+      })
     }
     cur = null
   }

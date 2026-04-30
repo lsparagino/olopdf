@@ -77,13 +77,31 @@ const zoomLabel = ref('100%')
 const leftStatus = ref<DiffKind | null>(null)
 const rightStatus = ref<DiffKind | null>(null)
 
-// Sidebar diff list — collapsible.
+// Sidebar diff list — collapsible. Function ref so hover bindings re-attach
+// every time the aside mounts (it's v-if'd on showDiffList && entries.length > 0,
+// so the sidebar usually doesn't exist yet at the screen's onMounted moment).
 const showDiffList = ref(true)
 const diffListEl = ref<HTMLElement | null>(null)
+let diffListHoverCleanup: (() => void) | null = null
+function setDiffListEl(el: unknown): void {
+  if (diffListHoverCleanup) {
+    diffListHoverCleanup()
+    diffListHoverCleanup = null
+  }
+  if (el && el instanceof HTMLElement) {
+    diffListEl.value = el
+    diffListHoverCleanup = bindHover(el)
+  } else {
+    diffListEl.value = null
+  }
+}
 
 // Cross-link highlight: any element with data-group-id, when hovered (or its sidebar
 // row hovered), highlights every visual element with the same id on the current page.
 const hoveredGroupId = ref<number | null>(null)
+// Persistent selection — set on click anywhere (sidebar row, ribbon, rail, on-page
+// diff box). Drives the .selected class on the sidebar row + sidebar auto-scroll.
+const selectedEntry = ref<{ page: number; groupId: number } | null>(null)
 
 interface SidebarEntry {
   page: number
@@ -124,21 +142,45 @@ function scheduleDrawConnectors() {
   })
 }
 
-// Cross-link hover: when the user hovers any element carrying data-group-id (an
-// on-page diff box, a ribbon, a rail, or a sidebar row), every other element with
-// the same id lights up via the .diff-active class. Driven imperatively because
-// the elements live in disjoint DOM subtrees.
+// Toggle a CSS class across all visual elements that belong to a given group on a
+// given page. Scoped queries are required because:
+//   - the sidebar renders one entry per group across all pages (same groupId
+//     repeats), so a global selector would activate every page's matching row
+//   - on-canvas / gutter elements only render for the current page, so they're
+//     queried inside .compare-overlay / .compare-connectors and only ever match
+//     the current page's nodes
+function toggleGroupClass(
+  groupId: number | null | undefined,
+  cls: string,
+  on: boolean,
+  page?: number,
+): void {
+  if (groupId === null || groupId === undefined) return
+  const targetPage = page ?? pdf.compare.currentPage
+  if (targetPage === pdf.compare.currentPage) {
+    document
+      .querySelectorAll(
+        `.compare-overlay [data-group-id="${groupId}"], .compare-connectors [data-group-id="${groupId}"]`,
+      )
+      .forEach((el) => el.classList.toggle(cls, on))
+  }
+  document
+    .querySelectorAll(
+      `.diff-entry[data-group-page="${targetPage}"][data-group-id="${groupId}"]`,
+    )
+    .forEach((el) => el.classList.toggle(cls, on))
+}
+
+// Cross-link hover (transient). Lives only while the cursor is over a group element.
 watch(hoveredGroupId, (newId, oldId) => {
-  if (oldId !== null && oldId !== undefined) {
-    document
-      .querySelectorAll(`[data-group-id="${oldId}"]`)
-      .forEach((el) => el.classList.remove('diff-active'))
-  }
-  if (newId !== null && newId !== undefined) {
-    document
-      .querySelectorAll(`[data-group-id="${newId}"]`)
-      .forEach((el) => el.classList.add('diff-active'))
-  }
+  toggleGroupClass(oldId, 'diff-active', false)
+  toggleGroupClass(newId, 'diff-active', true)
+})
+
+// Persistent click selection. Stays until the next click anywhere.
+watch(selectedEntry, (next, prev) => {
+  if (prev) toggleGroupClass(prev.groupId, 'diff-selected', false, prev.page)
+  if (next) toggleGroupClass(next.groupId, 'diff-selected', true, next.page)
 })
 
 function bindHover(el: HTMLElement | SVGElement | null): () => void {
@@ -165,32 +207,63 @@ function bindHover(el: HTMLElement | SVGElement | null): () => void {
   }
 }
 
+// Click delegation: anywhere a data-group-id is set (ribbon, rail, on-page box,
+// sidebar row), clicking jumps to that entry — same flow regardless of source.
+function bindClick(el: HTMLElement | SVGElement | null): () => void {
+  if (!el) return () => {}
+  function onClick(e: Event) {
+    const target = (e.target as Element).closest?.('[data-group-id]') as Element | null
+    if (!target) return
+    const raw = target.getAttribute('data-group-id')
+    if (raw === null) return
+    const id = Number.parseInt(raw, 10)
+    if (!Number.isFinite(id)) return
+    e.stopPropagation()
+    const pageAttr = target.getAttribute('data-group-page')
+    const page = pageAttr !== null ? Number(pageAttr) : pdf.compare.currentPage
+    const entry = sidebarEntries.value.find((x) => x.page === page && x.groupId === id)
+    if (entry) void jumpToEntry(entry)
+  }
+  el.addEventListener('click', onClick)
+  return () => el.removeEventListener('click', onClick)
+}
+
 async function jumpToEntry(entry: SidebarEntry): Promise<void> {
+  selectedEntry.value = { page: entry.page, groupId: entry.groupId }
   if (entry.page !== pdf.compare.currentPage) {
     await gotoComparePage(entry.page)
   }
-  // Find a box for this group on the canvas and scroll its containing pane to it.
+  // Scroll the appropriate pane to the change.
   const d = pdf.compare.diffs[entry.page]
   const g = d?.groups.find((x) => x.id === entry.groupId)
-  if (!g) return
-  const side: 'left' | 'right' = g.leftBoxes.length ? 'left' : 'right'
-  const boxes = side === 'left' ? g.leftBoxes : g.rightBoxes
-  if (!boxes.length) return
-  const u = unionBox(boxes)
-  const scale = side === 'left' ? leftScale : rightScale
-  const wrap = side === 'left' ? leftWrapEl.value : rightWrapEl.value
-  const stage = side === 'left' ? leftStageEl.value : rightStageEl.value
-  if (!wrap || !stage) return
-  const yPx = stage.offsetTop + (u.y + u.h / 2) * scale
-  wrap.scrollTo({
-    top: Math.max(0, yPx - wrap.clientHeight * 0.3),
-    behavior: 'smooth',
-  })
-  // Pulse highlight: temporarily activate even if not hovering.
+  if (g) {
+    const side: 'left' | 'right' = g.leftBoxes.length ? 'left' : 'right'
+    const boxes = side === 'left' ? g.leftBoxes : g.rightBoxes
+    if (boxes.length) {
+      const u = unionBox(boxes)
+      const scale = side === 'left' ? leftScale : rightScale
+      const wrap = side === 'left' ? leftWrapEl.value : rightWrapEl.value
+      const stage = side === 'left' ? leftStageEl.value : rightStageEl.value
+      if (wrap && stage) {
+        const yPx = stage.offsetTop + (u.y + u.h / 2) * scale
+        wrap.scrollTo({
+          top: Math.max(0, yPx - wrap.clientHeight * 0.3),
+          behavior: 'smooth',
+        })
+      }
+    }
+  }
+  // Pulse highlight to anchor the eye on the just-clicked group.
   hoveredGroupId.value = entry.groupId
   setTimeout(() => {
     if (hoveredGroupId.value === entry.groupId) hoveredGroupId.value = null
   }, 1200)
+  // Bring the sidebar row into view + give it focus.
+  await new Promise(requestAnimationFrame)
+  const row = diffListEl.value?.querySelector(
+    `.diff-entry[data-group-page="${entry.page}"][data-group-id="${entry.groupId}"]`,
+  ) as HTMLElement | null
+  row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
 }
 
 function clearOverlay(side: 'left' | 'right') {
@@ -198,21 +271,42 @@ function clearOverlay(side: 'left' | 'right') {
   if (el) el.innerHTML = ''
 }
 
-function paintOverlay(side: 'left' | 'right', boxes: DiffBox[], scale: number) {
+function paintOverlay(side: 'left' | 'right', groups: HunkGroup[], scale: number) {
+  // Renders the full per-side overlay: per-text-item diff boxes for content present
+  // on this side, AND a thin "insertion/deletion line" at the anchor Y for groups
+  // whose content lives only on the other side. The line marks the document-order
+  // attach point of the change (where the inserted text would have started, or
+  // where the deleted text used to be).
   const overlay = side === 'left' ? leftOverlayEl.value : rightOverlayEl.value
   if (!overlay) return
   overlay.innerHTML = ''
-  if (!boxes.length || !scale) return
+  if (!groups.length || !scale) return
   const frag = document.createDocumentFragment()
-  for (const b of boxes) {
-    const el = document.createElement('div')
-    el.className = `diff-box ${b.kind}`
-    if (b.groupId !== undefined) el.dataset.groupId = String(b.groupId)
-    el.style.left = `${b.x * scale}px`
-    el.style.top = `${b.y * scale}px`
-    el.style.width = `${Math.max(2, b.w * scale)}px`
-    el.style.height = `${Math.max(2, b.h * scale)}px`
-    frag.appendChild(el)
+  for (const g of groups) {
+    const sideBoxes = side === 'left' ? g.leftBoxes : g.rightBoxes
+    const otherBoxes = side === 'left' ? g.rightBoxes : g.leftBoxes
+    const anchorY = side === 'left' ? g.leftAnchorY : g.rightAnchorY
+
+    for (const b of sideBoxes) {
+      const el = document.createElement('div')
+      el.className = `diff-box ${b.kind}`
+      el.dataset.groupId = String(g.id)
+      el.style.left = `${b.x * scale}px`
+      el.style.top = `${b.y * scale}px`
+      el.style.width = `${Math.max(2, b.w * scale)}px`
+      el.style.height = `${Math.max(2, b.h * scale)}px`
+      frag.appendChild(el)
+    }
+
+    // Anchor line: only when this side is empty (the OTHER side has the change)
+    // and the diff layer captured an attach point (LCS-mode diffs only).
+    if (sideBoxes.length === 0 && otherBoxes.length > 0 && anchorY !== undefined) {
+      const line = document.createElement('div')
+      line.className = `diff-anchor-line ${g.kind}`
+      line.dataset.groupId = String(g.id)
+      line.style.top = `${anchorY * scale}px`
+      frag.appendChild(line)
+    }
   }
   overlay.appendChild(frag)
 }
@@ -486,8 +580,8 @@ async function renderComparePage(): Promise<void> {
 
   const d = c.diffs[idx]
   if (d) {
-    paintOverlay('left', d.leftBoxes, leftScale)
-    paintOverlay('right', d.rightBoxes, rightScale)
+    paintOverlay('left', d.groups, leftScale)
+    paintOverlay('right', d.groups, rightScale)
     setStatusBadge('left', d.leftStatus)
     setStatusBadge('right', d.rightStatus)
   } else {
@@ -500,6 +594,14 @@ async function renderComparePage(): Promise<void> {
   const shownScale = leftScale || rightScale || 1
   zoomLabel.value = c.fitMode ? 'Fit' : `${Math.round(shownScale * 100)}%`
   drawConnectors()
+
+  // Persistent selection survives navigation: if the user clicked a row on another
+  // page, those on-canvas elements didn't exist at click time. Re-apply the class
+  // here so the highlight reappears on the elements that were just rendered.
+  const sel = selectedEntry.value
+  if (sel && sel.page === pdf.compare.currentPage) {
+    toggleGroupClass(sel.groupId, 'diff-selected', true, sel.page)
+  }
 }
 
 async function gotoComparePage(idx: number): Promise<void> {
@@ -530,10 +632,31 @@ async function jumpDiff(direction: 1 | -1): Promise<void> {
     toast('No differences found', 'success')
     return
   }
-  if (currentHunkIdx < 0 || currentHunkIdx >= all.length) {
+  // Recalibrate if currentHunkIdx is stale or points to a hunk on a different page
+  // than the user is currently viewing (i.e. they navigated manually since the last
+  // jump). Without this, the next Prev/Next click jumps from the old anchor and
+  // appears to do nothing visible if the move doesn't change pages.
+  const stale =
+    currentHunkIdx < 0 ||
+    currentHunkIdx >= all.length ||
+    all[currentHunkIdx]?.page !== pdf.compare.currentPage
+  if (stale) {
     const page = pdf.compare.currentPage
     const onPage = all.findIndex((h) => h.page === page)
-    currentHunkIdx = onPage >= 0 ? onPage : direction > 0 ? -1 : all.length
+    if (onPage >= 0) {
+      // Anchor at the first hunk on the current page if going forward, last if back.
+      // direction +1 → idx = onPage + 1; direction -1 → idx = lastOnPage - 1
+      if (direction > 0) {
+        // Find last hunk on current page
+        let last = onPage
+        while (last + 1 < all.length && all[last + 1].page === page) last++
+        currentHunkIdx = last
+      } else {
+        currentHunkIdx = onPage
+      }
+    } else {
+      currentHunkIdx = direction > 0 ? -1 : all.length
+    }
   }
   let idx = currentHunkIdx + direction
   if (idx < 0) idx = all.length - 1
@@ -628,10 +751,28 @@ function drawConnectors(): void {
     const left = paneRange(g.leftBoxes, lcRect.top, ls)
     const right = paneRange(g.rightBoxes, rcRect.top, rs)
     if (!left && !right) continue
-    const leftTop = left?.top ?? right!.top
-    const leftBot = left?.bottom ?? right!.bottom
-    const rightTop = right?.top ?? left!.top
-    const rightBot = right?.bottom ?? left!.bottom
+
+    // For one-sided groups (added/removed), collapse the empty side to a single Y
+    // point at the diff's anchor — the bottom of the surviving match that precedes
+    // the change in document order. Falls back to the populated side's center if
+    // the diff layer didn't capture an anchor (visual-tile mode, or hunks at the
+    // very start/end of the document).
+    const leftAnchorScreenY =
+      g.leftAnchorY !== undefined
+        ? lcRect.top + g.leftAnchorY * ls - bRect.top
+        : right
+          ? (right.top + right.bottom) / 2
+          : 0
+    const rightAnchorScreenY =
+      g.rightAnchorY !== undefined
+        ? rcRect.top + g.rightAnchorY * rs - bRect.top
+        : left
+          ? (left.top + left.bottom) / 2
+          : 0
+    const leftTop = left?.top ?? leftAnchorScreenY
+    const leftBot = left?.bottom ?? leftAnchorScreenY
+    const rightTop = right?.top ?? rightAnchorScreenY
+    const rightBot = right?.bottom ?? rightAnchorScreenY
 
     const lOutside = leftBot < lyMin - 4 || leftTop > lyMax + 4
     const rOutside = rightBot < ryMin - 4 || rightTop > ryMax + 4
@@ -641,12 +782,14 @@ function drawConnectors(): void {
     let lb = clamp(leftBot, lyMin, lyMax)
     let rt = clamp(rightTop, ryMin, ryMax)
     let rb = clamp(rightBot, ryMin, ryMax)
-    if (lb - lt < MIN_RIBBON_HEIGHT) {
+    // Pad single-line populated sides to MIN_RIBBON_HEIGHT so the ribbon is visible.
+    // Skip the empty side — that's where the wedge is supposed to taper to a point.
+    if (left && lb - lt < MIN_RIBBON_HEIGHT) {
       const cy = (lt + lb) / 2
       lt = cy - MIN_RIBBON_HEIGHT / 2
       lb = cy + MIN_RIBBON_HEIGHT / 2
     }
-    if (rb - rt < MIN_RIBBON_HEIGHT) {
+    if (right && rb - rt < MIN_RIBBON_HEIGHT) {
       const cy = (rt + rb) / 2
       rt = cy - MIN_RIBBON_HEIGHT / 2
       rb = cy + MIN_RIBBON_HEIGHT / 2
@@ -667,23 +810,29 @@ function drawConnectors(): void {
     ribbon.setAttribute('data-group-id', String(g.id))
     frag.appendChild(ribbon)
 
-    const lRail = document.createElementNS(SVG_NS, 'rect')
-    lRail.setAttribute('x', String(lx - 3))
-    lRail.setAttribute('y', lt.toFixed(1))
-    lRail.setAttribute('width', '3')
-    lRail.setAttribute('height', Math.max(2, lb - lt).toFixed(1))
-    lRail.setAttribute('class', `rail ${g.kind}`)
-    lRail.setAttribute('data-group-id', String(g.id))
-    frag.appendChild(lRail)
+    // Skip rails on a side that has no content — the wedge already conveys that
+    // semantic and a 0-height rail would just be an invisible artifact.
+    if (left) {
+      const lRail = document.createElementNS(SVG_NS, 'rect')
+      lRail.setAttribute('x', String(lx - 3))
+      lRail.setAttribute('y', lt.toFixed(1))
+      lRail.setAttribute('width', '3')
+      lRail.setAttribute('height', Math.max(2, lb - lt).toFixed(1))
+      lRail.setAttribute('class', `rail ${g.kind}`)
+      lRail.setAttribute('data-group-id', String(g.id))
+      frag.appendChild(lRail)
+    }
 
-    const rRail = document.createElementNS(SVG_NS, 'rect')
-    rRail.setAttribute('x', String(rx))
-    rRail.setAttribute('y', rt.toFixed(1))
-    rRail.setAttribute('width', '3')
-    rRail.setAttribute('height', Math.max(2, rb - rt).toFixed(1))
-    rRail.setAttribute('class', `rail ${g.kind}`)
-    rRail.setAttribute('data-group-id', String(g.id))
-    frag.appendChild(rRail)
+    if (right) {
+      const rRail = document.createElementNS(SVG_NS, 'rect')
+      rRail.setAttribute('x', String(rx))
+      rRail.setAttribute('y', rt.toFixed(1))
+      rRail.setAttribute('width', '3')
+      rRail.setAttribute('height', Math.max(2, rb - rt).toFixed(1))
+      rRail.setAttribute('class', `rail ${g.kind}`)
+      rRail.setAttribute('data-group-id', String(g.id))
+      frag.appendChild(rRail)
+    }
   }
   svg.appendChild(frag)
 }
@@ -734,12 +883,15 @@ let scrollSyncCleanup: (() => void) | null = null
 let hoverCleanups: Array<() => void> = []
 
 function attachHoverBindings(): void {
+  // Bound once in onMounted for the canvas + gutter — those refs are stable for the
+  // lifetime of the screen. The diff-list aside has its own function ref handler
+  // (setDiffListEl) because it mounts/unmounts dynamically.
   for (const fn of hoverCleanups) fn()
   hoverCleanups = []
-  hoverCleanups.push(bindHover(leftOverlayEl.value))
-  hoverCleanups.push(bindHover(rightOverlayEl.value))
-  hoverCleanups.push(bindHover(connectorsEl.value))
-  hoverCleanups.push(bindHover(diffListEl.value))
+  for (const el of [leftOverlayEl.value, rightOverlayEl.value, connectorsEl.value]) {
+    hoverCleanups.push(bindHover(el))
+    hoverCleanups.push(bindClick(el))
+  }
 }
 
 onMounted(async () => {
@@ -764,17 +916,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   scrollSyncCleanup?.()
   for (const fn of hoverCleanups) fn()
+  diffListHoverCleanup?.()
 })
-
-// Re-bind sidebar hover when the sidebar mounts/unmounts.
-watch(showDiffList, () => {
-  void nextTickRebind()
-})
-
-async function nextTickRebind(): Promise<void> {
-  await new Promise(requestAnimationFrame)
-  attachHoverBindings()
-}
 
 watch(
   () => pdf.compare.zoom,
@@ -919,7 +1062,13 @@ watch(
         </span>
       </div>
       <div class="flex gap-1.5">
-        <UiButton variant="ghost" size="sm" title="Previous difference" @click="jumpDiff(-1)">
+        <UiButton
+          variant="ghost"
+          size="sm"
+          title="Previous difference"
+          :disabled="sidebarEntries.length === 0"
+          @click="jumpDiff(-1)"
+        >
           <svg
             viewBox="0 0 24 24"
             width="12"
@@ -934,7 +1083,13 @@ watch(
           </svg>
           Prev diff
         </UiButton>
-        <UiButton variant="ghost" size="sm" title="Next difference" @click="jumpDiff(1)">
+        <UiButton
+          variant="ghost"
+          size="sm"
+          title="Next difference"
+          :disabled="sidebarEntries.length === 0"
+          @click="jumpDiff(1)"
+        >
           Next diff
           <svg
             viewBox="0 0 24 24"
@@ -955,7 +1110,7 @@ watch(
     <div class="compare-main flex min-h-0 flex-1 gap-3">
       <aside
         v-if="showDiffList && sidebarEntries.length > 0"
-        ref="diffListEl"
+        :ref="setDiffListEl"
         class="diff-list glass min-h-0 w-[280px] flex-shrink-0 overflow-hidden rounded-[14px]"
       >
         <header
@@ -974,8 +1129,15 @@ watch(
             :key="`${e.page}:${e.groupId}`"
             type="button"
             class="diff-entry"
-            :class="['k-' + e.kind, { current: e.page === pdf.compare.currentPage }]"
-            :data-group-id="e.page === pdf.compare.currentPage ? e.groupId : null"
+            :class="[
+              'k-' + e.kind,
+              {
+                current: e.page === pdf.compare.currentPage,
+                selected:
+                  selectedEntry?.page === e.page && selectedEntry?.groupId === e.groupId,
+              },
+            ]"
+            :data-group-id="e.groupId"
             :data-group-page="e.page"
             @click="jumpToEntry(e)"
           >
@@ -1095,7 +1257,13 @@ watch(
       v-if="showNav"
       class="glass flex items-center justify-center gap-2.5 rounded-[14px] px-3.5 py-2"
     >
-      <UiButton variant="default" size="icon" title="Previous page" @click="gotoComparePage(pdf.compare.currentPage - 1)">
+      <UiButton
+        variant="default"
+        size="icon"
+        title="Previous page"
+        :disabled="pdf.compare.currentPage <= 0"
+        @click="gotoComparePage(pdf.compare.currentPage - 1)"
+      >
         <svg
           viewBox="0 0 24 24"
           width="14"
@@ -1112,7 +1280,13 @@ watch(
       <span class="min-w-[64px] text-center text-[13px] text-fg-dim" style="font-variant-numeric: tabular-nums">
         {{ pdf.compare.currentPage + 1 }} / {{ totalPages }}
       </span>
-      <UiButton variant="default" size="icon" title="Next page" @click="gotoComparePage(pdf.compare.currentPage + 1)">
+      <UiButton
+        variant="default"
+        size="icon"
+        title="Next page"
+        :disabled="pdf.compare.currentPage >= totalPages - 1"
+        @click="gotoComparePage(pdf.compare.currentPage + 1)"
+      >
         <svg
           viewBox="0 0 24 24"
           width="14"
@@ -1302,6 +1476,15 @@ watch(
   background: var(--color-glass-strong);
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.15);
+}
+/* Persistent selection — set on click anywhere (sidebar, ribbon, rail, on-page box). */
+.diff-entry.selected {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.22);
+}
+.diff-entry.selected.diff-active {
+  background: rgba(167, 139, 250, 0.2);
 }
 @media (max-width: 900px) {
   .compare-body {
@@ -1513,6 +1696,11 @@ watch(
   border-radius: 2px;
   animation: diff-pulse 0.6s var(--ease-out-soft);
   mix-blend-mode: multiply;
+  /* Override the parent overlay's pointer-events: none so the box is clickable +
+   * hoverable while the empty area between boxes still passes events through to
+   * the canvas underneath. */
+  pointer-events: auto;
+  cursor: pointer;
 }
 .compare-overlay .diff-box.removed {
   background: rgba(239, 68, 68, 0.45);
@@ -1527,28 +1715,69 @@ watch(
   outline: 1px solid rgba(202, 138, 4, 0.85);
 }
 
-/* Extended hover state — applied imperatively to every element sharing the hovered
- * group's id (on-page diff boxes, ribbons, rails, sidebar entries). Stronger
- * background, thicker outline, and a soft glow draw the eye to "this is the change
- * you're inspecting" across both pages and the gutter at once. */
-.compare-overlay .diff-box.diff-active {
+/* Insertion / deletion line — drawn on the side that has no content for a one-sided
+ * group, at the anchor Y captured during the LCS walk. Marks "the change attaches
+ * here in document order". Spans the full canvas width, narrow band, colored to
+ * match the change kind so it visually pairs with the wedge ribbon's collapse point.*/
+.compare-overlay .diff-anchor-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 1px;
+  transition: height 0.12s var(--ease-out-soft), opacity 0.12s var(--ease-out-soft);
+  /* Thin transient pulse on first paint to draw the eye to it. */
+  animation: diff-pulse 0.6s var(--ease-out-soft);
+  mix-blend-mode: multiply;
+}
+.compare-overlay .diff-anchor-line.added {
+  background: rgba(34, 197, 94, 0.85);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+}
+.compare-overlay .diff-anchor-line.removed {
+  background: rgba(239, 68, 68, 0.85);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+}
+.compare-overlay .diff-anchor-line.changed {
+  background: rgba(250, 204, 21, 0.85);
+  box-shadow: 0 0 6px rgba(250, 204, 21, 0.4);
+}
+.compare-overlay .diff-anchor-line.diff-active,
+.compare-overlay .diff-anchor-line.diff-selected {
+  height: 4px;
+  filter: brightness(1.2);
+}
+
+/* Extended highlight — both .diff-active (hover, transient) and .diff-selected
+ * (click, persistent) drive the same visual; the difference is purely lifecycle.
+ * Stronger background, thicker outline, and a soft glow draw the eye across both
+ * pages + the gutter to "this is the change you're inspecting". */
+.compare-overlay .diff-box.diff-active,
+.compare-overlay .diff-box.diff-selected {
   outline-width: 2px;
   outline-offset: 1px;
   z-index: 4;
-  animation: diff-glow 0.6s var(--ease-out-soft);
   filter: brightness(1.15) saturate(1.2);
 }
-.compare-overlay .diff-box.diff-active.removed {
+.compare-overlay .diff-box.diff-active {
+  animation: diff-glow 0.6s var(--ease-out-soft);
+}
+.compare-overlay .diff-box.diff-active.removed,
+.compare-overlay .diff-box.diff-selected.removed {
   background: rgba(239, 68, 68, 0.65);
   outline-color: rgba(220, 38, 38, 1);
   box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.25), 0 6px 18px rgba(220, 38, 38, 0.35);
 }
-.compare-overlay .diff-box.diff-active.added {
+.compare-overlay .diff-box.diff-active.added,
+.compare-overlay .diff-box.diff-selected.added {
   background: rgba(34, 197, 94, 0.65);
   outline-color: rgba(22, 163, 74, 1);
   box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.25), 0 6px 18px rgba(22, 163, 74, 0.35);
 }
-.compare-overlay .diff-box.diff-active.changed {
+.compare-overlay .diff-box.diff-active.changed,
+.compare-overlay .diff-box.diff-selected.changed {
   background: rgba(250, 204, 21, 0.6);
   outline-color: rgba(202, 138, 4, 1);
   box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.25), 0 6px 18px rgba(202, 138, 4, 0.35);
@@ -1579,6 +1808,8 @@ watch(
 .compare-connectors path.ribbon {
   stroke-width: 1;
   opacity: 0.55;
+  pointer-events: auto;
+  cursor: pointer;
   transition: opacity 0.15s var(--ease-out-soft), stroke-width 0.15s var(--ease-out-soft);
 }
 .compare-connectors path.ribbon.changed {
@@ -1593,17 +1824,21 @@ watch(
   fill: rgba(34, 197, 94, 0.22);
   stroke: rgba(22, 163, 74, 0.6);
 }
-.compare-connectors path.ribbon.diff-active {
+.compare-connectors path.ribbon.diff-active,
+.compare-connectors path.ribbon.diff-selected {
   opacity: 1;
   stroke-width: 1.75;
 }
-.compare-connectors path.ribbon.diff-active.changed {
+.compare-connectors path.ribbon.diff-active.changed,
+.compare-connectors path.ribbon.diff-selected.changed {
   fill: rgba(250, 204, 21, 0.55);
 }
-.compare-connectors path.ribbon.diff-active.removed {
+.compare-connectors path.ribbon.diff-active.removed,
+.compare-connectors path.ribbon.diff-selected.removed {
   fill: rgba(239, 68, 68, 0.5);
 }
-.compare-connectors path.ribbon.diff-active.added {
+.compare-connectors path.ribbon.diff-active.added,
+.compare-connectors path.ribbon.diff-selected.added {
   fill: rgba(34, 197, 94, 0.5);
 }
 
@@ -1611,6 +1846,8 @@ watch(
 .compare-connectors rect.rail {
   rx: 1.5;
   ry: 1.5;
+  pointer-events: auto;
+  cursor: pointer;
   transition: transform 0.15s var(--ease-out-soft);
   transform-box: fill-box;
   transform-origin: center;
@@ -1624,7 +1861,8 @@ watch(
 .compare-connectors rect.rail.added {
   fill: rgba(34, 197, 94, 0.85);
 }
-.compare-connectors rect.rail.diff-active {
+.compare-connectors rect.rail.diff-active,
+.compare-connectors rect.rail.diff-selected {
   transform: scaleX(2);
   filter: brightness(1.2);
 }

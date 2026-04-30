@@ -386,7 +386,13 @@ onBeforeUnmount(() => {
       <div
         class="glass flex items-center justify-center gap-2.5 rounded-[14px] px-3.5 py-2"
       >
-        <UiButton variant="default" size="icon" title="Previous page" @click="onPrev">
+        <UiButton
+          variant="default"
+          size="icon"
+          title="Previous page"
+          :disabled="pdf.currentPage <= 0"
+          @click="onPrev"
+        >
           <svg
             viewBox="0 0 24 24"
             width="14"
@@ -406,7 +412,13 @@ onBeforeUnmount(() => {
         >
           {{ pdf.currentPage + 1 }} / {{ pdf.pageOrder.length }}
         </span>
-        <UiButton variant="default" size="icon" title="Next page" @click="onNext">
+        <UiButton
+          variant="default"
+          size="icon"
+          title="Next page"
+          :disabled="pdf.currentPage >= pdf.pageOrder.length - 1"
+          @click="onNext"
+        >
           <svg
             viewBox="0 0 24 24"
             width="14"

@@ -102,7 +102,7 @@ function onCompare() {
             backgroundClip: 'text',
           }"
         >
-          PDF Editor
+          OloPDF
         </h1>
         <p class="mb-6 text-fg-dim">Modern, portable, beautiful</p>
         <p class="mb-7 text-[13px] text-fg-mute">Drop a PDF anywhere or pick an action below</p>

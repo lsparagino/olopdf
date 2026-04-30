@@ -54,7 +54,7 @@ function close() {
           <line x1="9" y1="18" x2="13" y2="18" />
         </svg>
       </div>
-      <span class="text-xs font-medium tracking-[0.2px]">PDF Editor</span>
+      <span class="text-xs font-medium tracking-[0.2px]">OloPDF</span>
     </div>
 
     <div class="no-drag flex">

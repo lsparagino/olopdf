@@ -3,6 +3,9 @@ import TitleBar from '@/components/layout/TitleBar.vue'
 import AppBackground from '@/components/layout/AppBackground.vue'
 import AppToast from '@/components/ui/AppToast.vue'
 import AppLoading from '@/components/ui/AppLoading.vue'
+import { useAppUpdates } from '@/composables/useAppUpdates'
+
+useAppUpdates()
 </script>
 
 <template>

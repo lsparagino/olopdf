@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
 const fsSync = require('fs');
+const { autoUpdater } = require('electron-updater');
 
 // ----- Startup diagnostics -----
 // On a target machine the app may exit before the window ever appears (renderer crash,
@@ -100,7 +101,42 @@ function createWindow() {
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('win:state', false));
 }
 
-app.whenReady().then(createWindow).catch(err => log('whenReady failed', err));
+// ----- Auto-updates (electron-updater + GitHub releases) -----
+// Only NSIS-installed copies update in place. Portable .exe runs from a
+// transient %TEMP% dir, so silent self-replace isn't safe — we surface a
+// "download available" link in the renderer instead.
+function isPortableBuild() {
+  return Boolean(process.env.PORTABLE_EXECUTABLE_DIR);
+}
+
+function setupAutoUpdater() {
+  if (!app.isPackaged) {
+    log('autoUpdater skipped: dev build');
+    return;
+  }
+  autoUpdater.logger = { info: (...a) => log('updater', ...a), warn: (...a) => log('updater warn', ...a), error: (...a) => log('updater error', ...a), debug: () => {} };
+  autoUpdater.autoDownload = !isPortableBuild();
+  autoUpdater.autoInstallOnAppQuit = !isPortableBuild();
+
+  const send = (channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  };
+  autoUpdater.on('update-available', (info) => send('update:available', { version: info.version, portable: isPortableBuild() }));
+  autoUpdater.on('update-not-available', () => send('update:none', null));
+  autoUpdater.on('download-progress', (p) => send('update:progress', { percent: p.percent }));
+  autoUpdater.on('update-downloaded', (info) => send('update:downloaded', { version: info.version }));
+  autoUpdater.on('error', (err) => send('update:error', { message: String(err && err.message || err) }));
+
+  // Defer so the window is up first.
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch(err => log('checkForUpdates failed', err));
+  }, 4000);
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  setupAutoUpdater();
+}).catch(err => log('whenReady failed', err));
 app.on('window-all-closed', () => app.quit());
 
 ipcMain.handle('dialog:open', async (_e, opts) => dialog.showOpenDialog(mainWindow, opts));
@@ -148,3 +184,21 @@ ipcMain.on('win:max', () => {
   mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
 });
 ipcMain.on('win:close', () => mainWindow && mainWindow.close());
+
+// ----- Auto-update IPC -----
+ipcMain.handle('update:check', async () => {
+  if (!app.isPackaged) return { skipped: 'dev' };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { version: result && result.updateInfo && result.updateInfo.version, portable: isPortableBuild() };
+  } catch (err) {
+    return { error: String(err && err.message || err) };
+  }
+});
+ipcMain.on('update:install', () => {
+  if (isPortableBuild()) return;
+  autoUpdater.quitAndInstall();
+});
+ipcMain.on('update:open-releases', () => {
+  shell.openExternal('https://github.com/lsparagino/pdf-editor/releases/latest');
+});

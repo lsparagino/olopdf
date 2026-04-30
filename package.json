@@ -1,23 +1,29 @@
 {
-  "name": "pdf-editor",
+  "name": "olopdf",
   "version": "1.0.5",
-  "description": "Modern, portable PDF editor — curated by Olopad",
+  "description": "OloPDF — modern, portable PDF editor curated by Olopad",
   "main": "main.js",
   "author": {
     "name": "Olopad",
     "email": "luca@sparagino.it"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lsparagino/pdf-editor.git"
+  },
   "scripts": {
     "start": "electron .",
     "start:legacy": "cross-env LEGACY_RENDERER=1 electron .",
     "dev:vite": "vite",
     "dev": "node scripts/dev.js",
     "type-check": "vue-tsc --noEmit",
+    "build:icons": "node scripts/build-icons.mjs",
     "build:renderer": "vite build",
-    "prebuild": "npm version patch --no-git-tag-version && npm run build:renderer",
-    "build": "electron-builder --win portable",
-    "dist": "electron-builder --win portable",
+    "prebuild": "npm run build:renderer",
+    "build": "electron-builder --win",
+    "dist": "electron-builder --win",
+    "release": "node scripts/release.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -30,6 +36,8 @@
     "electron": "^28.3.3",
     "electron-builder": "^24.13.3",
     "jsdom": "^29.1.0",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5",
     "tailwindcss": "^4.2.4",
     "typescript": "^6.0.3",
     "unplugin-vue-router": "^0.19.2",
@@ -38,6 +46,7 @@
     "vue-tsc": "^3.2.7"
   },
   "dependencies": {
+    "electron-updater": "^6.8.3",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "3.11.174",
     "pinia": "^3.0.4",
@@ -45,8 +54,8 @@
     "vue-router": "^4.6.4"
   },
   "build": {
-    "appId": "com.olopad.pdfeditor",
-    "productName": "PDF Editor",
+    "appId": "com.olopad.olopdf",
+    "productName": "OloPDF",
     "copyright": "Copyright © 2026 Olopad",
     "npmRebuild": false,
     "buildDependenciesFromSource": false,
@@ -65,12 +74,35 @@
       "!*.config.*",
       "!tsconfig*.json"
     ],
+    "directories": {
+      "buildResources": "build"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lsparagino",
+        "repo": "pdf-editor",
+        "releaseType": "release"
+      }
+    ],
     "win": {
-      "target": "portable",
-      "artifactName": "PDF-Editor-Portable.exe"
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "OloPDF",
+      "artifactName": "OloPDF-Setup-${version}.exe"
     },
     "portable": {
-      "artifactName": "PDF-Editor-Portable.exe"
+      "artifactName": "OloPDF-Portable-${version}.exe"
     }
   }
 }

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-A modern, portable PDF editor built as a frameless Electron app with a Vue 3 + TypeScript renderer. Edit text/bookmarks/page order, merge multiple PDFs, and compare two PDFs side-by-side. Single-file Windows portable build.
+**OloPDF** — modern, portable PDF editor built as a frameless Electron app with a Vue 3 + TypeScript renderer. Edit text/bookmarks/page order, merge multiple PDFs, and compare two PDFs side-by-side. Ships as an NSIS one-click installer (with auto-updates via GitHub Releases) and a single-file Windows portable `.exe`.
 
 ## Standards
 
@@ -28,7 +28,9 @@ MUST FOLLOW THESE RULES, NO EXCEPTIONS
 - `npm run dev:vite` — Vite alone, useful for browser-only tweaks (no Electron APIs available)
 - `npm run start:legacy` — run the pre-Vue vanilla-JS renderer in `renderer/` (kept side-by-side during the migration; sets `LEGACY_RENDERER=1` so main.js loads `renderer/index.html`)
 - `npm run build:renderer` — `vite build` → `dist-renderer/`
-- `npm run build` — full Windows portable build via electron-builder (runs `prebuild` which bumps version + builds renderer)
+- `npm run build` — Windows NSIS installer + portable build via electron-builder (runs `prebuild` which builds the renderer)
+- `npm run build:icons` — regenerate `build/icon.ico` + `build/icon.png` from `build/icon.svg`
+- `npm run release [-- patch|minor|major|x.y.z]` — bump version, build, publish draft to GitHub Releases, tag, push (requires `GH_TOKEN`)
 - `npm run type-check` — `vue-tsc --noEmit`
 - `npm run test` / `npm run test:watch` — vitest
 

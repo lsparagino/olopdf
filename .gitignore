@@ -1,2 +1,5 @@
 node_modules
 dist
+dist-renderer
+.dev.log
+src/typed-router.d.ts

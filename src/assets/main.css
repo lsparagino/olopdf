@@ -1,0 +1,116 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #0a0a14;
+  --color-fg: #eef0f7;
+  --color-fg-dim: #aab0c2;
+  --color-fg-mute: #6b7188;
+
+  --color-accent: #a78bfa;
+  --color-accent-2: #ec4899;
+  --color-accent-3: #38bdf8;
+  --color-curator: #00ffcc;
+
+  --color-glass: rgba(255, 255, 255, 0.06);
+  --color-glass-strong: rgba(255, 255, 255, 0.10);
+  --color-glass-border: rgba(255, 255, 255, 0.12);
+  --color-glass-border-strong: rgba(255, 255, 255, 0.20);
+
+  --shadow-glass: 0 8px 32px rgba(0, 0, 0, 0.35);
+
+  --radius-glass: 14px;
+  --radius-glass-sm: 8px;
+
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+  html,
+  body,
+  #app {
+    height: 100%;
+    width: 100%;
+  }
+  html,
+  body {
+    overflow: hidden;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    cursor: pointer;
+    padding: 0;
+  }
+  input {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+@utility glass {
+  background: var(--color-glass);
+  border: 1px solid var(--color-glass-border);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--shadow-glass);
+}
+
+@utility no-drag {
+  -webkit-app-region: no-drag;
+}
+
+@utility app-drag {
+  -webkit-app-region: drag;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes pulse-ring {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.3);
+  }
+  50% {
+    transform: scale(1.04);
+    box-shadow: 0 0 0 12px rgba(167, 139, 250, 0);
+  }
+}

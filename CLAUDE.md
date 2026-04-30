@@ -1,96 +1,156 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+A modern, portable PDF editor built as a frameless Electron app with a Vue 3 + TypeScript renderer. Edit text/bookmarks/page order, merge multiple PDFs, and compare two PDFs side-by-side. Single-file Windows portable build.
 
-## Commands
+## Standards
 
-- `npm start` — run the app in dev (electron .)
-- `npm run build` — produce `dist/PDF-Editor-Portable.exe` via electron-builder (single-file Windows portable target)
-- `node --check main.js && node --check renderer/app.js` — quick syntax sanity check (no test suite exists)
+MUST FOLLOW THESE RULES, NO EXCEPTIONS
 
-There is no lint config, test runner, or type checker in this project. Don't invent commands for them.
+- Stack: Electron (main: JS), Vue 3, TypeScript, TailwindCSS v4, Vue Router 4 + unplugin-vue-router, Pinia, Vite, vitest. **No Pinia Colada** — this app has no remote data fetching.
+- Patterns: ALWAYS use Composition API + `<script setup>`, NEVER use Options API
+- ALWAYS keep types alongside your code; prefer `interface` over `type` for object shapes
+- Tests live alongside the file they test: `src/composables/useToast.ts` + `src/composables/useToast.spec.ts`
+- ALWAYS use TailwindCSS classes rather than manual CSS. The exception is the canvas/text-layer area where precise pixel-level positioning is required — those still use scoped `<style>` blocks.
+- DO NOT hard code colors; use the tokens defined in `src/assets/main.css` (`--color-accent`, `--color-fg-dim`, etc.) which are exposed as Tailwind utilities (`bg-accent`, `text-fg-dim`, …)
+- ONLY add comments that explain *why* something is done, not what it does
+- ALWAYS use named functions when declaring methods; arrow functions only for callbacks
+- ALWAYS prefer named exports over default exports — except `.vue` SFCs, which export the component as default by language convention
+- ALWAYS define props with `defineProps<{ … }>()` and TypeScript types, WITHOUT `const props =` (use `const props =` only if props are read in the script block)
+- Destructure props to declare default values
+- ALWAYS define emits with `const emit = defineEmits<{ eventName: [arg: T] }>()`
+- Use `defineModel<T>()` for two-way bindings, never manual `modelValue`/`update:modelValue` pairs
+- Component file names PascalCase (`TitleBar.vue`); compose from general to specific (`WelcomeRecents.vue`, not `RecentsWelcome.vue`)
+- Dev server runs on `http://localhost:5173`; HMR is on. Use `npm run dev` (orchestrates Vite + Electron). Do NOT launch `npm start` or `electron .` directly while developing — that loads the prod-built renderer.
+
+## Project Commands
+
+- `npm run dev` — start Vite + Electron with HMR (loads `VITE_DEV_SERVER_URL` in main.js)
+- `npm run dev:vite` — Vite alone, useful for browser-only tweaks (no Electron APIs available)
+- `npm run start:legacy` — run the pre-Vue vanilla-JS renderer in `renderer/` (kept side-by-side during the migration; sets `LEGACY_RENDERER=1` so main.js loads `renderer/index.html`)
+- `npm run build:renderer` — `vite build` → `dist-renderer/`
+- `npm run build` — full Windows portable build via electron-builder (runs `prebuild` which bumps version + builds renderer)
+- `npm run type-check` — `vue-tsc --noEmit`
+- `npm run test` / `npm run test:watch` — vitest
+
+## Project Structure
+
+```
+main.js                       # Electron main (JS — kept as-is, low churn)
+scripts/dev.js                # Dev orchestrator: starts Vite, launches Electron with VITE_DEV_SERVER_URL
+index.html                    # Vite entry; mounts <div id="app"> + /src/main.ts
+vite.config.ts                # Externalizes electron/fs/path/pdfjs-dist/pdf-lib so window.require() resolves at runtime
+src/
+├── main.ts                   # Vue app entry — installs Pinia + router, mounts App
+├── App.vue                   # Root: titlebar + background + <RouterView> with screen transition
+├── vite-env.d.ts             # Ambient types (vite/client, unplugin-vue-router/client, __APP_VERSION__)
+├── assets/
+│   └── main.css              # Tailwind v4 import + @theme tokens + base resets + .glass utility
+├── router/
+│   └── index.ts              # createMemoryHistory + auto-routes from unplugin-vue-router
+├── stores/
+│   └── pdf.ts                # Pinia store: pdfBytes, pageOrder, annotations, repeats, bookmarks, compare, mergeFiles
+├── pages/                    # File-based routes (unplugin-vue-router)
+│   ├── (welcome).vue         # /  — welcome screen (route name "welcome")
+│   ├── editor.vue            # /editor
+│   ├── merge.vue             # /merge
+│   └── compare.vue           # /compare
+├── components/
+│   ├── ui/                   # Reusable primitives — UiButton, UiToast, UiLoading, …
+│   ├── layout/               # TitleBar, AppBackground
+│   └── features/<feature>/   # Feature-specific composites: features/welcome/WelcomeRecents.vue, …
+├── composables/              # useToast, useLoading, useRecents, useOpenPdf, usePdfEngine, useChromeZoomDefense
+└── utils/
+    ├── electron.ts           # window.require wrappers for ipcRenderer/shell/fs/path
+    └── pdf.ts                # hexToRgb01, cssFontFamily, pickStandardFont, formatBytes
+```
 
 ## Architecture
 
-A frameless Electron app: one main process (`main.js`), one renderer split into modules under `renderer/src/` and stylesheets under `renderer/styles/`. `nodeIntegration: true, contextIsolation: false` — the renderer uses `require()` directly. Don't introduce a preload bridge unless the threat model changes.
+A frameless Electron app: one main process (`main.js`), Vue 3 renderer under `src/`. `nodeIntegration: true, contextIsolation: false` — the renderer uses `window.require()` directly to access Electron and Node modules. Don't introduce a preload bridge unless the threat model changes.
 
-### Renderer module layout
+### Cross-component communication
 
-`renderer/app.js` is a thin entry that requires each feature module in dependency order. Each module wires up its own DOM listeners on import.
+1. **Pinia store** (`src/stores/pdf.ts`) — single source of truth for the open document, annotations, page order, compare state, merge files. Components subscribe reactively; mutations go through actions where the change is non-trivial.
+2. **Composables for reusable logic** — `useOpenPdf`, `useToast`, `useLoading`, `useRecents`, `usePdfjs`, `useChromeZoomDefense`. Return `ref`s for state, named functions for actions.
+3. **Custom events on `window`** — kept for cross-cutting concerns where coupling a producer to a consumer would create a cycle. Current events:
+   - `pdf:wheel-zoom` — emitted by `useChromeZoomDefense`, handled by the editor's zoom logic.
+   - `pdf:zoom-key` — same source, fires on Ctrl+=/Ctrl+−/Ctrl+0.
+   - `pdf:page-rendered` — emitted by the viewer after each canvas render; the text overlay and the active-thumb highlighter listen.
+   - `pdf:bookmarks-changed` — emitted after a page deletion that may purge bookmarks.
 
-| Module | Responsibility |
-|---|---|
-| `state.js` | Singleton `state` object + frozen `config` constants |
-| `dom.js` | `$`, `toast`, modal/loading helpers, `showScreen` + `onScreenChange` listeners |
-| `util.js` | Pure utilities: `hexToRgb01`, `cssFontFamily`, `pickStandardFont`, `formatBytes` |
-| `pdf-engine.js` | pdf.js worker setup (Blob URL — survives asar) |
-| `chrome.js` | Window controls, capture-phase Ctrl+= / Ctrl+wheel intercept, escape, modal bg close |
-| `welcome.js` | Welcome screen, drop zone, file open, recents, curator link, version display |
-| `viewer.js` | `renderCurrentPage` + `renderTextLayer` (manual). Emits `pdf:page-rendered` |
-| `thumbnails.js` | Sidebar thumbs + grid view. Shared `paintThumb` and `buildThumb` helpers (DRY) |
-| `pages.js` | `gotoPage`, `deletePage`, `movePage`, prev/next, keyboard nav, resize re-fit |
-| `text.js` | Add-text modal + placed-text overlay + drag. Exports `placePendingTextAt` |
-| `zoom-pan.js` | Zoom buttons + wheel-zoom event listener + pan + canvas-wrap mousedown orchestration |
-| `bookmarks.js` | Bookmark modal, sidebar list, selection capture, `gotoBookmark` |
-| `save.js` | Output PDF assembly: copy, draw text, repeat, build outline |
-| `merge.js` | Merge mode (drop, drag-reorder, output) |
-
-### Cross-module communication
-
-Modules avoid direct cycles via two mechanisms:
-
-1. **Custom events on `window`**:
-   - `pdf:page-rendered` — emitted by `viewer.js` after each page render. `text.js` redraws the placed-text overlay; `thumbnails.js` re-highlights the active thumb.
-   - `pdf:wheel-zoom` — emitted by `chrome.js`, handled by `zoom-pan.js` (so chrome doesn't have to import zoom logic).
-   - `pdf:bookmarks-changed` — emitted by `pages.js` after a delete that may purge bookmarks; `bookmarks.js` re-renders.
-2. **Lazy `require()`** inside function bodies for the few real cycles (e.g. `thumbnails.js` lazily requires `pages.js` from inside drag handlers, `welcome.js` lazily loads viewer/thumb/bookmark modules from `loadPdfBytes`). The cycle resolves at call time, not module-load time.
-
-Prefer events for fan-out notifications, lazy require only when the dependency is genuinely circular.
+Prefer the store for shared state, composables for shared behavior, events only for fan-out notifications.
 
 ### Two PDF libraries, two purposes
-- **pdf.js (`pdfjs-dist/legacy/build/pdf.js`)** — rendering only (canvas + text-extraction for the selectable text layer). Worker is loaded by reading `pdf.worker.js` from `node_modules` with `fs.readFileSync` and wrapping it as a `Blob` URL — this works in dev and in the packaged asar. Don't replace it with a path-based `workerSrc`; that breaks under asar.
+
+- **pdf.js (`pdfjs-dist/legacy/build/pdf.js`)** — rendering only (canvas + text extraction). Wrapped by `composables/usePdfEngine.ts`. Worker is loaded by reading `pdf.worker.js` from `node_modules` with `fs.readFileSync` and wrapping it as a `Blob` URL — this works in dev (Vite externalizes both `fs` and `pdfjs-dist`, so `require.resolve` runs against Node's resolver) and in the packaged asar. Don't replace it with a path-based `workerSrc`; that breaks under asar.
 - **pdf-lib** — all editing (page reordering/deletion, merging, drawing text, building the outline). Used only at save time, never during preview.
 
+Both libraries are listed in `vite.config.ts` `rollupOptions.external` so the bundler leaves the `require` calls alone.
+
 ### Page identity through edits
-The renderer never mutates the source PDF in memory. State is:
-- `state.pdfBytes` — original ArrayBuffer (immutable)
-- `state.pageOrder` — array of *original* page indices, mutated by reorder/delete
+
+The renderer never mutates the source PDF in memory. The store holds:
+
+- `pdfBytes` — original `ArrayBuffer` (immutable)
+- `pageOrder` — array of *original* page indices, mutated by reorder/delete
 - All annotations/bookmarks reference `pageOriginalIdx`, not UI position
 
-This means deleting page 3 from the UI just splices `pageOrder`; annotations on still-present pages survive. On save, `pdf-lib`'s `copyPages(srcDoc, state.pageOrder)` reconstructs the document in the new order, and `origToNewIdx` maps original indices to their new position when applying text/bookmarks.
+Deleting page 3 from the UI just splices `pageOrder`; annotations on still-present pages survive. On save, `pdf-lib`'s `copyPages(srcDoc, pageOrder)` reconstructs the document in the new order, and an `origToNewIdx` map applies text/bookmarks to their new positions.
 
 ### Coordinate systems
-The viewer uses **top-left** origin (CSS pixels, scaled by `state.zoom`). PDF user space is **bottom-left**. Conversion happens only at save time:
+
+The viewer uses **top-left** origin (CSS pixels, scaled by `pdf.zoom`). PDF user space is **bottom-left**. Conversion happens only at save time:
+
 - Text: stored as `{x, yFromTop}` in PDF user units; written as `y: pageHeight - y - size`
 - Bookmark anchors: stored top-left; written into `/XYZ` Dest as `[x, pageHeight - y, null]`
 
 If you add another spatial feature, follow the same convention: store top-left, flip on save.
 
 ### Two text-annotation arrays, on purpose
-- `state.textAnnotations[]` — per-page (has `pageOriginalIdx`)
-- `state.repeatTexts[]` — header/footer (no page index; applied to every output page)
+
+- `pdf.textAnnotations[]` — per-page (has `pageOriginalIdx`)
+- `pdf.repeatTexts[]` — header/footer (no page index; applied to every output page)
 
 They render together in the overlay with a ↻ badge distinguishing repeats. Don't merge them; the separation is what makes "drag a footer" move it everywhere.
 
 ### The text layer is rendered manually
-`renderTextLayer` does **not** call `pdfjsLib.renderTextLayer`. We iterate `page.getTextContent().items`, compose `viewport.transform × item.transform` via `pdfjsLib.Util.transform`, and emit our own `<span>` per text run. Reason: pdf.js's renderer plus our global chrome `user-select: none` produced an unselectable layer regardless of override. Manual spans + `!important user-select: text` is the working combination — keep it.
 
-### Mousedown priority on `canvasWrap`
+The viewer does **not** call `pdfjsLib.renderTextLayer`. It iterates `page.getTextContent().items`, composes `viewport.transform × item.transform` via `pdfjsLib.Util.transform`, and emits its own `<span>` per text run. Reason: pdf.js's renderer plus our global chrome `user-select: none` produced an unselectable layer regardless of override. Manual spans + `!important user-select: text` is the working combination — keep it. Because the layer is imperative, render it inside `onMounted`/`watch` callbacks with a Vue `ref` to the container `<div>`, not as reactive template content.
+
+### Mousedown priority on the canvas wrapper
+
 A single handler enforces the order:
-1. `state.pendingTextPlacement` set → place text and return
-2. Target is inside `.text-layer` and is not the layer itself (i.e. a `<span>`) → return so the browser handles selection
-3. Otherwise → `startPan(e)`, but only if there's actual scroll overflow
 
-`.placed-text` elements have their own mousedown that calls `stopPropagation`, so they never reach this handler. Preserve this order if you add interactions; the design is "selection beats pan, drag beats both, placement beats everything."
+1. `pdf.pendingTextPlacement` set → place text and return
+2. Target is inside the text-layer and is a `<span>` (not the layer itself) → return so the browser handles selection
+3. Otherwise → start pan, but only if there's actual scroll overflow
+
+Placed-text elements have their own mousedown that calls `stopPropagation`, so they never reach this handler. Preserve this order if you add interactions; the design is "selection beats pan, drag beats both, placement beats everything."
 
 ### Bookmarks (PDF outline)
-`addOutline` in [renderer/app.js](renderer/app.js) hand-builds the `/Outlines` tree using `pdfDoc.context.nextRef()`, `PDFArray.withContext`, and assignments via `ctx.assign`. pdf-lib has no high-level outline API. The Dest array uses `/XYZ` with x,y when the bookmark was anchored to a text selection (captured via `window.getSelection()` before the modal opens), or `null` x,y for plain page bookmarks.
+
+The save logic hand-builds the `/Outlines` tree using `pdfDoc.context.nextRef()`, `PDFArray.withContext`, and assignments via `ctx.assign`. pdf-lib has no high-level outline API. The Dest array uses `/XYZ` with `x,y` when the bookmark was anchored to a text selection (captured via `window.getSelection()` before the modal opens), or `null` `x,y` for plain page bookmarks.
 
 ### Layout invariant: `min-height: 0`
-The grid/flex chain `.editor` → `.content` → `.canvas-wrap` plus the sidebars all need `min-height: 0` (or `flex-shrink: 0` for individual scrollable items). Without it, a zoomed canvas pushes the bottom toolbar off-screen because flex/grid items default to `min-*: auto` and grow to fit content. If you add a new scrolling region, replicate the pattern.
+
+The flex chain editor → content → canvas-wrap, plus the sidebars, all need `min-height: 0` (or `flex-shrink: 0` for individual scrollable items). Without it, a zoomed canvas pushes the bottom toolbar off-screen because flex items default to `min-height: auto` and grow to fit content. If you add a new scrolling region, replicate the pattern. With Tailwind v4, this is `min-h-0`.
 
 ### Recents
+
 Persisted to `app.getPath('userData')/recents.json` via three IPC handlers (`recents:get/add/remove`) in [main.js](main.js). The renderer filters the list against `fs.access` on every render so deleted files don't appear. Capped at 5, deduplicated, newest first. `addRecent` runs only on a successful open (so failures don't pollute the list).
 
-### Window chrome
-`frame: false` with custom title bar; drag region via `-webkit-app-region: drag` on `.titlebar-drag`, no-drag on the buttons. Chrome zoom is locked three ways: `webFrame.setZoomFactor(1)` + `setVisualZoomLevelLimits(1, 1)` in renderer, `webContents.setZoomFactor(1)` + `zoom-changed` reset in main, and capture-phase `keydown`/`wheel` interceptors that route Ctrl+= / Ctrl+− / Ctrl+0 / Ctrl+wheel to the PDF zoom buttons. All three layers exist intentionally — Chromium leaks zoom through any single defense.
+### Window chrome and the three-layer zoom defense
+
+`frame: false` with custom title bar; drag region via `-webkit-app-region: drag` on the title-bar drag area, no-drag on the buttons. Chrome zoom is locked three ways:
+
+1. **Renderer** — `webFrame.setZoomFactor(1)` + `setVisualZoomLevelLimits(1, 1)` in `TitleBar.vue` `onMounted`
+2. **Main** — `webContents.setZoomFactor(1)` + `zoom-changed` reset in `main.js`
+3. **Capture-phase intercepts** — `useChromeZoomDefense` listens for Ctrl+=/Ctrl+−/Ctrl+0/Ctrl+wheel at the `window` level with `{ capture: true }`, prevents default, and dispatches `pdf:zoom-key` / `pdf:wheel-zoom` for the editor to handle.
+
+All three layers exist intentionally — Chromium leaks zoom through any single defense. Don't remove any of them.
+
+## Research & Documentation
+
+- NEVER hallucinate URLs.
+- For Vue/Pinia/Vue Router/Tailwind, follow the existing patterns in this repo first; check `https://vuejs.org/llms.txt` and `https://router.vuejs.org/llms.txt` if you need to verify an API.
+- Verify examples and patterns from documentation before using.

@@ -72,9 +72,20 @@ function createWindow() {
     if (level >= 2) log('renderer console', level, message, sourceId + ':' + line);
   });
 
-  const indexPath = path.join(__dirname, 'renderer', 'index.html');
-  log('loadFile', indexPath);
-  mainWindow.loadFile(indexPath).catch(err => log('loadFile failed', err));
+  const devUrl = process.env.VITE_DEV_SERVER_URL;
+  if (devUrl) {
+    log('loadURL', devUrl);
+    mainWindow.loadURL(devUrl).catch(err => log('loadURL failed', err));
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  } else if (process.env.LEGACY_RENDERER === '1') {
+    const indexPath = path.join(__dirname, 'renderer', 'index.html');
+    log('loadFile (legacy)', indexPath);
+    mainWindow.loadFile(indexPath).catch(err => log('loadFile failed', err));
+  } else {
+    const indexPath = path.join(__dirname, 'dist-renderer', 'index.html');
+    log('loadFile', indexPath);
+    mainWindow.loadFile(indexPath).catch(err => log('loadFile failed', err));
+  }
 
   // Lock the chrome zoom — PDF zoom is handled inside the renderer
   mainWindow.webContents.on('did-finish-load', () => {

@@ -10,17 +10,39 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "prebuild": "npm version patch --no-git-tag-version",
+    "start:legacy": "cross-env LEGACY_RENDERER=1 electron .",
+    "dev:vite": "vite",
+    "dev": "node scripts/dev.js",
+    "type-check": "vue-tsc --noEmit",
+    "build:renderer": "vite build",
+    "prebuild": "npm version patch --no-git-tag-version && npm run build:renderer",
     "build": "electron-builder --win portable",
-    "dist": "electron-builder --win portable"
+    "dist": "electron-builder --win portable",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.2.4",
+    "@types/node": "^20.19.39",
+    "@vitejs/plugin-vue": "^6.0.6",
+    "@vue/test-utils": "^2.4.9",
+    "cross-env": "^10.1.0",
     "electron": "^28.3.3",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "jsdom": "^29.1.0",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^6.0.3",
+    "unplugin-vue-router": "^0.19.2",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.5",
+    "vue-tsc": "^3.2.7"
   },
   "dependencies": {
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "3.11.174"
+    "pdfjs-dist": "3.11.174",
+    "pinia": "^3.0.4",
+    "vue": "^3.5.33",
+    "vue-router": "^4.6.4"
   },
   "build": {
     "appId": "com.olopad.pdfeditor",
@@ -30,13 +52,18 @@
     "buildDependenciesFromSource": false,
     "files": [
       "main.js",
-      "renderer/**/*",
+      "dist-renderer/**/*",
       "node_modules/**/*",
       "!node_modules/canvas/**/*",
       "!node_modules/**/*.{md,markdown,map,ts,d.ts}",
       "!node_modules/**/{test,tests,docs,example,examples}/**",
       "!node_modules/**/.bin",
-      "!node_modules/**/*.{cc,cpp,h,c,gyp,mk}"
+      "!node_modules/**/*.{cc,cpp,h,c,gyp,mk}",
+      "!src/**",
+      "!renderer/**",
+      "!scripts/**",
+      "!*.config.*",
+      "!tsconfig*.json"
     ],
     "win": {
       "target": "portable",

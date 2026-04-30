@@ -10,6 +10,7 @@ A modern, portable PDF editor for Windows. NSIS one-click installer with auto-up
 - **Open & view** PDFs with selectable text, fit-to-page, and zoom
 - **Merge** multiple PDFs with drag-and-drop reordering
 - **Reorder & delete pages** — sidebar thumbnails or a full-screen grid view
+- **Rotate pages** 90° at a time (clockwise / counter-clockwise), saved as the PDF's `/Rotate` flag
 - **Add text** anywhere on a page, drag to reposition, optionally repeat as a header/footer on every page
 - **Bookmarks** — anchored to a specific page, or to a text selection so the reader jumps to the exact spot
 - **Compare** two PDFs side-by-side with text-level diff highlighting

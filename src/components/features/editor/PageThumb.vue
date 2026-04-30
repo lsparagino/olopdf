@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { paintThumb } from '@/composables/useThumbnails'
+import { usePdfStore } from '@/stores/pdf'
 
 interface Props {
   uiIdx: number
@@ -24,8 +25,14 @@ const emit = defineEmits<{
 }>()
 
 const canvasEl = ref<HTMLCanvasElement | null>(null)
+const pdf = usePdfStore()
+const rotation = computed(() => pdf.pageRotations[props.origIdx] ?? 0)
 
 onMounted(() => {
+  if (canvasEl.value) void paintThumb(canvasEl.value, props.origIdx, props.targetWidth)
+})
+
+watch(rotation, () => {
   if (canvasEl.value) void paintThumb(canvasEl.value, props.origIdx, props.targetWidth)
 })
 

@@ -8,7 +8,7 @@ interface RenderTaskLike {
 }
 
 interface PdfPageLike {
-  getViewport(opts: { scale: number }): {
+  getViewport(opts: { scale: number; rotation?: number }): {
     width: number
     height: number
     transform: number[]
@@ -35,8 +35,9 @@ export async function renderCurrentPage(): Promise<void> {
 
   const origIdx = pdf.pageOrder[pdf.currentPage]
   const page = (await pdf.pdfjsDoc.getPage(origIdx + 1)) as PdfPageLike
+  const rotation = pdf.rotationFor(origIdx)
 
-  const baseViewport = page.getViewport({ scale: 1 })
+  const baseViewport = page.getViewport({ scale: 1, rotation })
   let scale = pdf.zoom
   if (pdf.fitMode) {
     const aw = wrap.clientWidth - PDF_CONFIG.CANVAS_PADDING
@@ -46,7 +47,7 @@ export async function renderCurrentPage(): Promise<void> {
     pdf.zoom = scale
   }
 
-  const viewport = page.getViewport({ scale })
+  const viewport = page.getViewport({ scale, rotation })
   const dpr = window.devicePixelRatio || 1
   canvas.width = Math.floor(viewport.width * dpr)
   canvas.height = Math.floor(viewport.height * dpr)

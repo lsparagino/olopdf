@@ -62,3 +62,65 @@ export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
+
+export function normalizeRotation(deg: number): 0 | 90 | 180 | 270 {
+  const r = ((Math.round(deg / 90) * 90) % 360 + 360) % 360
+  return r as 0 | 90 | 180 | 270
+}
+
+// Given a rotated viewport's (width, height), return the unrotated page dims.
+export function unrotatedDims(
+  rotatedW: number,
+  rotatedH: number,
+  rotation: number,
+): { uW: number; uH: number } {
+  const r = normalizeRotation(rotation)
+  if (r === 90 || r === 270) return { uW: rotatedH, uH: rotatedW }
+  return { uW: rotatedW, uH: rotatedH }
+}
+
+// Top-left → top-left transform from unrotated PDF user-space (zoom=1) to a
+// canvas rotated by R degrees CW (zoom=1). uW/uH are the unrotated page dims.
+export function forwardTransform(
+  x: number,
+  y: number,
+  uW: number,
+  uH: number,
+  rotation: number,
+): { cx: number; cy: number } {
+  const r = normalizeRotation(rotation)
+  if (r === 0) return { cx: x, cy: y }
+  if (r === 90) return { cx: uH - y, cy: x }
+  if (r === 180) return { cx: uW - x, cy: uH - y }
+  return { cx: y, cy: uW - x }
+}
+
+// Inverse of forwardTransform: rotated-canvas (zoom=1) → unrotated user-space (zoom=1).
+export function inverseTransform(
+  cx: number,
+  cy: number,
+  uW: number,
+  uH: number,
+  rotation: number,
+): { x: number; y: number } {
+  const r = normalizeRotation(rotation)
+  if (r === 0) return { x: cx, y: cy }
+  if (r === 90) return { x: cy, y: uH - cx }
+  if (r === 180) return { x: uW - cx, y: uH - cy }
+  return { x: uW - cy, y: cx }
+}
+
+// Inverse-rotate a (dx, dy) delta expressed in rotated-canvas axes back to
+// unrotated-page axes. Used for drag handling so a screen-space drag updates
+// (ann.x, ann.y) in the unrotated coordinate system.
+export function inverseDelta(
+  dx: number,
+  dy: number,
+  rotation: number,
+): { dx: number; dy: number } {
+  const r = normalizeRotation(rotation)
+  if (r === 0) return { dx, dy }
+  if (r === 90) return { dx: dy, dy: -dx }
+  if (r === 180) return { dx: -dx, dy: -dy }
+  return { dx: -dy, dy: dx }
+}

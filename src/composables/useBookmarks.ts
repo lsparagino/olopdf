@@ -1,6 +1,7 @@
 import { useEditorRefs } from '@/composables/useEditorRefs'
 import { usePdfStore, type CapturedSelection } from '@/stores/pdf'
 import { gotoPage } from '@/composables/usePageActions'
+import { forwardTransform, inverseTransform, unrotatedDims } from '@/utils/pdf'
 
 export function captureCanvasSelection(): CapturedSelection | null {
   const refs = useEditorRefs()
@@ -15,15 +16,20 @@ export function captureCanvasSelection(): CapturedSelection | null {
   if (!text) return null
   const rect = range.getBoundingClientRect()
   const cr = canvas.getBoundingClientRect()
-  const cx = rect.left - cr.left
-  const cy = rect.top - cr.top
+  const cxs = rect.left - cr.left
+  const cys = rect.top - cr.top
   const pdf = usePdfStore()
   const scale = pdf.zoom
+  const origIdx = pdf.pageOrder[pdf.currentPage]
+  const rotation = pdf.rotationFor(origIdx)
+  const bv = pdf.baseViewport
+  const dims = bv ? unrotatedDims(bv.width, bv.height, rotation) : { uW: 0, uH: 0 }
+  const { x, y } = inverseTransform(cxs / scale, cys / scale, dims.uW, dims.uH, rotation)
   return {
     text,
-    x: cx / scale,
-    y: cy / scale,
-    pageOriginalIdx: pdf.pageOrder[pdf.currentPage],
+    x,
+    y,
+    pageOriginalIdx: origIdx,
   }
 }
 
@@ -37,9 +43,13 @@ export async function gotoBookmark(b: { pageOriginalIdx: number; x?: number; y?:
     const refs = useEditorRefs()
     const wrap = refs.canvasWrap.value
     if (!wrap) return
+    const rotation = pdf.rotationFor(b.pageOriginalIdx)
+    const bv = pdf.baseViewport
+    const dims = bv ? unrotatedDims(bv.width, bv.height, rotation) : { uW: 0, uH: 0 }
+    const { cx, cy } = forwardTransform(b.x, b.y, dims.uW, dims.uH, rotation)
     wrap.scrollTo({
-      left: Math.max(0, b.x * pdf.zoom - 60),
-      top: Math.max(0, b.y * pdf.zoom - 60),
+      left: Math.max(0, cx * pdf.zoom - 60),
+      top: Math.max(0, cy * pdf.zoom - 60),
       behavior: 'smooth',
     })
   }

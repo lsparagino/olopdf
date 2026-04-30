@@ -10,7 +10,7 @@ import { ipcInvoke, nodePath, writeFileBytes } from '@/utils/electron'
 const pdfLib = (window as unknown as { require: (m: string) => typeof import('pdf-lib') }).require(
   'pdf-lib',
 )
-const { PDFDocument, rgb, PDFName, PDFString, PDFArray, PDFNumber } = pdfLib
+const { PDFDocument, rgb, PDFName, PDFString, PDFArray, PDFNumber, degrees } = pdfLib
 
 interface SaveDialogResult {
   canceled: boolean
@@ -58,6 +58,8 @@ export async function savePdf(): Promise<void> {
     copied.forEach((p, i) => {
       newDoc.addPage(p)
       origToNewIdx.set(pdf.pageOrder[i], i)
+      const rot = pdf.rotationFor(pdf.pageOrder[i])
+      if (rot !== 0) p.setRotation(degrees(rot))
     })
 
     for (const a of pdf.textAnnotations) {

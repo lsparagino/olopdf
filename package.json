@@ -90,7 +90,9 @@
         "nsis",
         "portable"
       ],
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "publisherName": "Olopad",
+      "fileAssociations": []
     },
     "nsis": {
       "oneClick": true,
@@ -99,7 +101,10 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "OloPDF",
-      "artifactName": "OloPDF-Setup-${version}.exe"
+      "artifactName": "OloPDF-Setup-${version}.exe",
+      "publisherName": "Olopad",
+      "uninstallDisplayName": "OloPDF",
+      "verifyUpdateCodeSignature": false
     },
     "portable": {
       "artifactName": "OloPDF-Portable-${version}.exe"

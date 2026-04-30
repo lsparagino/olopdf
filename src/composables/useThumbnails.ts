@@ -1,7 +1,7 @@
 import { usePdfStore } from '@/stores/pdf'
 
 interface PdfPageLike {
-  getViewport(opts: { scale: number }): { width: number; height: number }
+  getViewport(opts: { scale: number; rotation?: number }): { width: number; height: number }
   render(opts: { canvasContext: CanvasRenderingContext2D; viewport: unknown }): {
     promise: Promise<void>
   }
@@ -29,9 +29,10 @@ export async function paintThumb(
   if (!pdf.pdfjsDoc) return
   try {
     const page = (await pdf.pdfjsDoc.getPage(origIdx + 1)) as PdfPageLike
-    const vp1 = page.getViewport({ scale: 1 })
+    const rotation = pdf.rotationFor(origIdx)
+    const vp1 = page.getViewport({ scale: 1, rotation })
     const scale = targetWidth / vp1.width
-    const viewport = page.getViewport({ scale })
+    const viewport = page.getViewport({ scale, rotation })
     const w = Math.floor(viewport.width)
     const h = Math.floor(viewport.height)
     canvas.width = w

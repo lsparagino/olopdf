@@ -10,7 +10,14 @@
 import { PDF_CONFIG, usePdfStore, type TextAnnotation } from '@/stores/pdf'
 import { useEditorRefs } from '@/composables/useEditorRefs'
 import { toast } from '@/composables/useToast'
-import { cssFontFamily, type FontFamily } from '@/utils/pdf'
+import {
+  cssFontFamily,
+  forwardTransform,
+  inverseDelta,
+  inverseTransform,
+  unrotatedDims,
+  type FontFamily,
+} from '@/utils/pdf'
 
 const FONTS: FontFamily[] = ['helvetica', 'times', 'courier']
 
@@ -110,17 +117,33 @@ function makePlacedTextEl(ann: TextAnnotation, isRepeat: boolean): HTMLDivElemen
   return el
 }
 
+// Returns the current page's rotation and unrotated dims, derived from the
+// rendered baseViewport. Defaults to (0, 0, 0) if the doc isn't ready.
+function pageRotationContext(): { rotation: number; uW: number; uH: number } {
+  const pdf = usePdfStore()
+  const origIdx = pdf.pageOrder[pdf.currentPage]
+  const rotation = origIdx !== undefined ? pdf.rotationFor(origIdx) : 0
+  const bv = pdf.baseViewport
+  if (!bv) return { rotation, uW: 0, uH: 0 }
+  const { uW, uH } = unrotatedDims(bv.width, bv.height, rotation)
+  return { rotation, uW, uH }
+}
+
 function positionPlacedText(el: HTMLElement, ann: TextAnnotation): void {
   const pdf = usePdfStore()
   const scale = pdf.zoom
-  el.style.left = `${ann.x * scale}px`
-  el.style.top = `${ann.y * scale}px`
+  const { rotation, uW, uH } = pageRotationContext()
+  const { cx, cy } = forwardTransform(ann.x, ann.y, uW, uH, rotation)
+  el.style.left = `${cx * scale}px`
+  el.style.top = `${cy * scale}px`
   el.style.fontSize = `${ann.size * scale}px`
   el.style.color = ann.color
   el.style.fontFamily = cssFontFamily(ann.font || 'helvetica')
   el.style.fontWeight = ann.bold ? '700' : '400'
   el.style.fontStyle = ann.italic ? 'italic' : 'normal'
   el.style.textDecoration = ann.underline ? 'underline' : 'none'
+  el.style.transformOrigin = '0 0'
+  el.style.transform = rotation ? `rotate(${rotation}deg)` : ''
 }
 
 function onTextMouseDown(e: MouseEvent, el: HTMLDivElement, ann: TextAnnotation): void {
@@ -137,11 +160,13 @@ function onTextMouseDown(e: MouseEvent, el: HTMLDivElement, ann: TextAnnotation)
   const origX = ann.x
   const origY = ann.y
   const scale = pdf.zoom
+  const { rotation } = pageRotationContext()
   let moved = false
 
   function onMove(ev: MouseEvent) {
-    const dx = (ev.clientX - startX) / scale
-    const dy = (ev.clientY - startY) / scale
+    const dCx = (ev.clientX - startX) / scale
+    const dCy = (ev.clientY - startY) / scale
+    const { dx, dy } = inverseDelta(dCx, dCy, rotation)
     if (
       !moved &&
       Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) >
@@ -181,13 +206,15 @@ export function placePendingTextAt(clientX: number, clientY: number): boolean {
   const canvas = refs.pdfCanvas.value
   if (!canvas) return false
   const r = canvas.getBoundingClientRect()
-  const cx = clientX - r.left
-  const cy = clientY - r.top
-  if (cx < 0 || cy < 0 || cx > r.width || cy > r.height) return false
+  const cxs = clientX - r.left
+  const cys = clientY - r.top
+  if (cxs < 0 || cys < 0 || cxs > r.width || cys > r.height) return false
   const scale = pdf.zoom
+  const { rotation, uW, uH } = pageRotationContext()
+  const { x, y } = inverseTransform(cxs / scale, cys / scale, uW, uH, rotation)
   const ann: TextAnnotation = {
-    x: cx / scale,
-    y: cy / scale,
+    x,
+    y,
     text: '',
     size: p.size,
     color: p.color,
@@ -267,9 +294,13 @@ function openEditor({ ann, isRepeat, isNew, sourceEl }: OpenEditorOpts): void {
 function positionEditor(el: HTMLElement, ann: TextAnnotation): void {
   const pdf = usePdfStore()
   const scale = pdf.zoom
-  el.style.left = `${ann.x * scale}px`
-  el.style.top = `${ann.y * scale}px`
+  const { rotation, uW, uH } = pageRotationContext()
+  const { cx, cy } = forwardTransform(ann.x, ann.y, uW, uH, rotation)
+  el.style.left = `${cx * scale}px`
+  el.style.top = `${cy * scale}px`
   el.style.fontSize = `${ann.size * scale}px`
+  el.style.transformOrigin = '0 0'
+  el.style.transform = rotation ? `rotate(${rotation}deg)` : ''
 }
 
 function applyEditorStyle(el: HTMLElement, ann: TextAnnotation): void {

@@ -8,7 +8,7 @@ import SelectionToolbar from '@/components/features/editor/SelectionToolbar.vue'
 import { PDF_CONFIG, usePdfStore, type Bookmark } from '@/stores/pdf'
 import { useEditorRefs } from '@/composables/useEditorRefs'
 import { renderCurrentPage } from '@/composables/usePdfRenderer'
-import { gotoPage, deletePage, movePage } from '@/composables/usePageActions'
+import { gotoPage, deletePage, movePage, rotatePage } from '@/composables/usePageActions'
 import { useZoomPan } from '@/composables/useZoomPan'
 import { createPageDragHandlers } from '@/composables/useThumbnails'
 import {
@@ -69,6 +69,14 @@ function onMouseDown(e: MouseEvent) {
 
 function onAddText() {
   startTextPlacement()
+}
+
+function onRotateLeft() {
+  void rotatePage(pdf.currentPage, 'ccw')
+}
+
+function onRotateRight() {
+  void rotatePage(pdf.currentPage, 'cw')
 }
 
 function onAddBookmark() {
@@ -293,6 +301,36 @@ onBeforeUnmount(() => {
               <rect x="14" y="14" width="7" height="7" />
             </svg>
             <span>{{ pdf.gridMode ? 'Done' : 'Reorder' }}</span>
+          </UiButton>
+          <UiButton variant="ghost" size="sm" title="Rotate page left" @click="onRotateLeft">
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="1 4 1 10 7 10" />
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+            </svg>
+          </UiButton>
+          <UiButton variant="ghost" size="sm" title="Rotate page right" @click="onRotateRight">
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
           </UiButton>
           <UiButton variant="ghost" size="sm" title="Add text" @click="onAddText">
             <svg

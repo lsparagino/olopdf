@@ -77,6 +77,7 @@ export interface PdfStoreState {
   pdfBytes: ArrayBuffer | null
   pdfjsDoc: PdfjsDocLike | null
   pageOrder: number[]
+  pageRotations: Record<number, number>
   bookmarks: Bookmark[]
   textAnnotations: TextAnnotation[]
   repeatTexts: TextAnnotation[]
@@ -133,6 +134,7 @@ export const usePdfStore = defineStore('pdf', {
     pdfBytes: null,
     pdfjsDoc: null,
     pageOrder: [],
+    pageRotations: {},
     bookmarks: [],
     textAnnotations: [],
     repeatTexts: [],
@@ -170,6 +172,7 @@ export const usePdfStore = defineStore('pdf', {
       // pdf.js methods see their own `this`.
       this.pdfjsDoc = markRaw(doc)
       this.pageOrder = Array.from({ length: numPages }, (_, i) => i)
+      this.pageRotations = {}
       this.bookmarks = []
       this.textAnnotations = []
       this.repeatTexts = []
@@ -209,8 +212,27 @@ export const usePdfStore = defineStore('pdf', {
       this.pageOrder.splice(uiIdx, 1)
       this.textAnnotations = this.textAnnotations.filter((a) => a.pageOriginalIdx !== removedOrig)
       this.bookmarks = this.bookmarks.filter((b) => b.pageOriginalIdx !== removedOrig)
+      delete this.pageRotations[removedOrig]
+      this.thumbCache.delete(removedOrig)
       if (this.currentPage >= this.pageOrder.length) this.currentPage = this.pageOrder.length - 1
       return true
+    },
+
+    rotatePage(uiIdx: number, dir: 'cw' | 'ccw'): number | null {
+      const origIdx = this.pageOrder[uiIdx]
+      if (origIdx === undefined) return null
+      const current = this.pageRotations[origIdx] ?? 0
+      const delta = dir === 'cw' ? 90 : -90
+      const next = ((current + delta) % 360 + 360) % 360
+      if (next === 0) delete this.pageRotations[origIdx]
+      else this.pageRotations[origIdx] = next
+      // Thumb cache is keyed on origIdx with no rotation dimension; invalidate it.
+      this.thumbCache.delete(origIdx)
+      return next
+    },
+
+    rotationFor(origIdx: number): number {
+      return this.pageRotations[origIdx] ?? 0
     },
 
     movePageOrder(src: number, dest: number) {

@@ -9,19 +9,11 @@ const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', impo
   version: string
 }
 
-const electronExternals = [
-  'electron',
-  'fs',
-  'fs/promises',
-  'path',
-  'os',
-  'url',
-  'pdfjs-dist',
-  'pdfjs-dist/legacy/build/pdf.js',
-  'pdfjs-dist/legacy/build/pdf.worker.js',
-  'pdf-lib',
-]
-
+// Node-side deps (electron, fs, pdfjs-dist, pdf-lib, ...) are loaded with
+// window.require(...) at runtime, so they never enter the bundle and don't
+// need to be externalized. Letting Vite emit a regular ESM bundle keeps the
+// `<script type="module">` HTML entry compatible — a CJS bundle in module
+// context dies on its first `exports` reference.
 export default defineConfig({
   plugins: [
     VueRouter({
@@ -44,15 +36,6 @@ export default defineConfig({
     outDir: 'dist-renderer',
     emptyOutDir: true,
     target: 'chrome120',
-    rollupOptions: {
-      external: electronExternals,
-      output: {
-        format: 'cjs',
-      },
-    },
-  },
-  optimizeDeps: {
-    exclude: electronExternals,
   },
   server: {
     port: 5173,

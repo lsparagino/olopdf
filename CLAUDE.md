@@ -87,7 +87,7 @@ Prefer the store for shared state, composables for shared behavior, events only 
 - **pdf.js (`pdfjs-dist/legacy/build/pdf.js`)** — rendering only (canvas + text extraction). Wrapped by `composables/usePdfEngine.ts`. Worker is loaded by reading `pdf.worker.js` from `node_modules` with `fs.readFileSync` and wrapping it as a `Blob` URL — this works in dev (Vite externalizes both `fs` and `pdfjs-dist`, so `require.resolve` runs against Node's resolver) and in the packaged asar. Don't replace it with a path-based `workerSrc`; that breaks under asar.
 - **pdf-lib** — all editing (page reordering/deletion, merging, drawing text, building the outline). Used only at save time, never during preview.
 
-Both libraries are listed in `vite.config.ts` `rollupOptions.external` so the bundler leaves the `require` calls alone.
+Both libraries are loaded with `window.require(...)` at runtime — never imported. The bundler sees nothing to resolve, so they stay out of the asar bundle and load straight from `node_modules` via Electron's Node integration. Don't add them to `rollupOptions.external` — that combination forced `format: 'cjs'` historically and crashed the renderer in production with `exports is not defined`.
 
 ### Page identity through edits
 

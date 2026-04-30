@@ -1,4 +1,5 @@
-// pdf.js setup. Externalized via vite.config so window.require resolves it at runtime.
+// pdf.js loaded via window.require (nodeIntegration: true) so the bundler
+// never sees it.
 //
 // Worker is loaded as a Blob URL from the resolved Node path of pdf.worker.js.
 // Reason: this works in dev (Vite serves bundled JS but Node still resolves node_modules)

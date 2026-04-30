@@ -1,4 +1,4 @@
-// pdf-lib is externalized in vite.config — window.require keeps it as a runtime Node import.
+// pdf-lib loaded via window.require (nodeIntegration: true), kept out of the bundle.
 const pdfLib = (window as unknown as { require: (m: string) => typeof import('pdf-lib') }).require(
   'pdf-lib',
 )

@@ -16,6 +16,8 @@ export interface DiffBox {
   w: number
   h: number
   kind: DiffKind
+  text?: string  // source text item (text-mode diffs only; undefined for visual-tile diffs)
+  groupId?: number  // populated by groupHunks() — links boxes/ribbons/rails for hover cross-linking
 }
 
 export interface Hunk {
@@ -24,10 +26,26 @@ export interface Hunk {
   rightBoxes: DiffBox[]
 }
 
+/**
+ * A merged hunk: groups multiple word/cell-level hunks whose Y positions are close
+ * enough to share one ribbon connector. Used by the connector renderer AND the
+ * sidebar diff list AND the hover cross-link — everything that names "this change"
+ * speaks in groups, not raw hunks.
+ */
+export interface HunkGroup {
+  id: number
+  kind: DiffKind
+  leftBoxes: DiffBox[]
+  rightBoxes: DiffBox[]
+  leftText: string
+  rightText: string
+}
+
 export interface PageDiff {
   leftBoxes: DiffBox[]
   rightBoxes: DiffBox[]
   hunks: Hunk[]
+  groups: HunkGroup[]
   leftBaseW: number
   leftBaseH: number
   rightBaseW: number
@@ -68,6 +86,7 @@ function emptyDiff(): PageDiff {
     leftBoxes: [],
     rightBoxes: [],
     hunks: [],
+    groups: [],
     leftBaseW: 0,
     leftBaseH: 0,
     rightBaseW: 0,
@@ -82,7 +101,74 @@ function emptyDiff(): PageDiff {
 
 function itemBox(item: TextItem | null, kind: DiffKind): DiffBox | null {
   if (!item || !item.norm) return null
-  return { x: item.x, y: item.y, w: item.w, h: item.h, kind }
+  return { x: item.x, y: item.y, w: item.w, h: item.h, kind, text: item.str }
+}
+
+/**
+ * Merge hunks whose Y positions are within ~one body-text line of each other into
+ * named groups. Stable across renders (PDF coordinates, not screen pixels), so the
+ * same group id can be referenced by ribbons, on-page boxes, and sidebar rows for
+ * hover cross-linking. Stamps `groupId` on every contained DiffBox.
+ */
+export function groupHunks(hunks: Hunk[]): HunkGroup[] {
+  const PROXIMITY_PDF = 10
+
+  function primaryY(h: Hunk): number {
+    return h.leftBoxes[0]?.y ?? h.rightBoxes[0]?.y ?? 0
+  }
+  function bottomY(boxes: DiffBox[]): number {
+    let bottom = -Infinity
+    for (const b of boxes) {
+      const v = b.y + b.h
+      if (v > bottom) bottom = v
+    }
+    return bottom === -Infinity ? 0 : bottom
+  }
+  function joinText(boxes: DiffBox[]): string {
+    return boxes
+      .map((b) => b.text ?? '')
+      .filter((t) => t.length > 0)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  const sorted = [...hunks].sort((a, b) => primaryY(a) - primaryY(b))
+  const groups: HunkGroup[] = []
+
+  for (const h of sorted) {
+    const last = groups[groups.length - 1]
+    if (last) {
+      const lastLeftBot = bottomY(last.leftBoxes)
+      const lastRightBot = bottomY(last.rightBoxes)
+      const hLeftTop = h.leftBoxes[0]?.y ?? h.rightBoxes[0]?.y ?? 0
+      const hRightTop = h.rightBoxes[0]?.y ?? h.leftBoxes[0]?.y ?? 0
+      const closeLeft = h.leftBoxes.length === 0 || hLeftTop - lastLeftBot < PROXIMITY_PDF
+      const closeRight = h.rightBoxes.length === 0 || hRightTop - lastRightBot < PROXIMITY_PDF
+      if (closeLeft && closeRight) {
+        last.leftBoxes.push(...h.leftBoxes)
+        last.rightBoxes.push(...h.rightBoxes)
+        if (last.leftBoxes.length && last.rightBoxes.length) last.kind = 'changed'
+        last.leftText = joinText(last.leftBoxes)
+        last.rightText = joinText(last.rightBoxes)
+        continue
+      }
+    }
+    groups.push({
+      id: groups.length,
+      kind: h.kind,
+      leftBoxes: [...h.leftBoxes],
+      rightBoxes: [...h.rightBoxes],
+      leftText: joinText(h.leftBoxes),
+      rightText: joinText(h.rightBoxes),
+    })
+  }
+
+  for (const g of groups) {
+    for (const b of g.leftBoxes) b.groupId = g.id
+    for (const b of g.rightBoxes) b.groupId = g.id
+  }
+  return groups
 }
 
 async function pageTextItems(
@@ -230,10 +316,12 @@ function assembleDiff(
       addedCount++
     }
   }
+  const groups = groupHunks(hunks)
   return {
     leftBoxes,
     rightBoxes,
     hunks,
+    groups,
     leftBaseW: ld ? ld.baseW : 0,
     leftBaseH: ld ? ld.baseH : 0,
     rightBaseW: rd ? rd.baseW : 0,
@@ -262,10 +350,12 @@ function wholePageDiff(
         },
       ]
     : []
+  const groups = groupHunks(hunks)
   return {
     leftBoxes: side === 'left' ? boxes : [],
     rightBoxes: side === 'right' ? boxes : [],
     hunks,
+    groups,
     leftBaseW: side === 'left' ? data.baseW : 0,
     leftBaseH: side === 'left' ? data.baseH : 0,
     rightBaseW: side === 'right' ? data.baseW : 0,
@@ -394,10 +484,12 @@ export async function diffPageVisual(
 
   if (!lc) {
     const box: DiffBox = { x: 0, y: 0, w: baseRW, h: baseRH, kind: 'added' }
+    const hunks: Hunk[] = [{ kind: 'added', leftBoxes: [], rightBoxes: [box] }]
     return {
       leftBoxes: [],
       rightBoxes: [box],
-      hunks: [{ kind: 'added', leftBoxes: [], rightBoxes: [box] }],
+      hunks,
+      groups: groupHunks(hunks),
       leftBaseW: 0,
       leftBaseH: 0,
       rightBaseW: baseRW,
@@ -411,10 +503,12 @@ export async function diffPageVisual(
   }
   if (!rc) {
     const box: DiffBox = { x: 0, y: 0, w: baseLW, h: baseLH, kind: 'removed' }
+    const hunks: Hunk[] = [{ kind: 'removed', leftBoxes: [box], rightBoxes: [] }]
     return {
       leftBoxes: [box],
       rightBoxes: [],
-      hunks: [{ kind: 'removed', leftBoxes: [box], rightBoxes: [] }],
+      hunks,
+      groups: groupHunks(hunks),
       leftBaseW: baseLW,
       leftBaseH: baseLH,
       rightBaseW: 0,
@@ -467,6 +561,7 @@ export async function diffPageVisual(
     leftBoxes,
     rightBoxes,
     hunks,
+    groups: groupHunks(hunks),
     leftBaseW: baseLW,
     leftBaseH: baseLH,
     rightBaseW: baseRW,

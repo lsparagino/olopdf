@@ -15,6 +15,7 @@ import {
   type DiffBox,
   type DiffKind,
   type FlatHunk,
+  type HunkGroup,
   type PageDiff,
 } from '@/composables/useCompareDiff'
 
@@ -76,6 +77,39 @@ const zoomLabel = ref('100%')
 const leftStatus = ref<DiffKind | null>(null)
 const rightStatus = ref<DiffKind | null>(null)
 
+// Sidebar diff list — collapsible.
+const showDiffList = ref(true)
+const diffListEl = ref<HTMLElement | null>(null)
+
+// Cross-link highlight: any element with data-group-id, when hovered (or its sidebar
+// row hovered), highlights every visual element with the same id on the current page.
+const hoveredGroupId = ref<number | null>(null)
+
+interface SidebarEntry {
+  page: number
+  groupId: number
+  kind: DiffKind
+  leftText: string
+  rightText: string
+}
+
+const sidebarEntries = computed<SidebarEntry[]>(() => {
+  const out: SidebarEntry[] = []
+  pdf.compare.diffs.forEach((d, page) => {
+    if (!d || !d.groups) return
+    for (const g of d.groups) {
+      out.push({
+        page,
+        groupId: g.id,
+        kind: g.kind,
+        leftText: g.leftText,
+        rightText: g.rightText,
+      })
+    }
+  })
+  return out
+})
+
 let leftScale = 1
 let rightScale = 1
 let currentHunkIdx = -1
@@ -88,6 +122,75 @@ function scheduleDrawConnectors() {
     connectorRafPending = false
     drawConnectors()
   })
+}
+
+// Cross-link hover: when the user hovers any element carrying data-group-id (an
+// on-page diff box, a ribbon, a rail, or a sidebar row), every other element with
+// the same id lights up via the .diff-active class. Driven imperatively because
+// the elements live in disjoint DOM subtrees.
+watch(hoveredGroupId, (newId, oldId) => {
+  if (oldId !== null && oldId !== undefined) {
+    document
+      .querySelectorAll(`[data-group-id="${oldId}"]`)
+      .forEach((el) => el.classList.remove('diff-active'))
+  }
+  if (newId !== null && newId !== undefined) {
+    document
+      .querySelectorAll(`[data-group-id="${newId}"]`)
+      .forEach((el) => el.classList.add('diff-active'))
+  }
+})
+
+function bindHover(el: HTMLElement | SVGElement | null): () => void {
+  if (!el) return () => {}
+  function onOver(e: Event) {
+    const target = (e.target as Element).closest?.('[data-group-id]') as Element | null
+    if (!target) return
+    const raw = target.getAttribute('data-group-id')
+    if (raw === null) return
+    const page = target.getAttribute('data-group-page')
+    // For sidebar rows (which carry data-group-page), only activate if same page.
+    if (page !== null && Number(page) !== pdf.compare.currentPage) return
+    const id = Number.parseInt(raw, 10)
+    if (Number.isFinite(id)) hoveredGroupId.value = id
+  }
+  function onLeave() {
+    hoveredGroupId.value = null
+  }
+  el.addEventListener('mouseover', onOver)
+  el.addEventListener('mouseleave', onLeave)
+  return () => {
+    el.removeEventListener('mouseover', onOver)
+    el.removeEventListener('mouseleave', onLeave)
+  }
+}
+
+async function jumpToEntry(entry: SidebarEntry): Promise<void> {
+  if (entry.page !== pdf.compare.currentPage) {
+    await gotoComparePage(entry.page)
+  }
+  // Find a box for this group on the canvas and scroll its containing pane to it.
+  const d = pdf.compare.diffs[entry.page]
+  const g = d?.groups.find((x) => x.id === entry.groupId)
+  if (!g) return
+  const side: 'left' | 'right' = g.leftBoxes.length ? 'left' : 'right'
+  const boxes = side === 'left' ? g.leftBoxes : g.rightBoxes
+  if (!boxes.length) return
+  const u = unionBox(boxes)
+  const scale = side === 'left' ? leftScale : rightScale
+  const wrap = side === 'left' ? leftWrapEl.value : rightWrapEl.value
+  const stage = side === 'left' ? leftStageEl.value : rightStageEl.value
+  if (!wrap || !stage) return
+  const yPx = stage.offsetTop + (u.y + u.h / 2) * scale
+  wrap.scrollTo({
+    top: Math.max(0, yPx - wrap.clientHeight * 0.3),
+    behavior: 'smooth',
+  })
+  // Pulse highlight: temporarily activate even if not hovering.
+  hoveredGroupId.value = entry.groupId
+  setTimeout(() => {
+    if (hoveredGroupId.value === entry.groupId) hoveredGroupId.value = null
+  }, 1200)
 }
 
 function clearOverlay(side: 'left' | 'right') {
@@ -104,6 +207,7 @@ function paintOverlay(side: 'left' | 'right', boxes: DiffBox[], scale: number) {
   for (const b of boxes) {
     const el = document.createElement('div')
     el.className = `diff-box ${b.kind}`
+    if (b.groupId !== undefined) el.dataset.groupId = String(b.groupId)
     el.style.left = `${b.x * scale}px`
     el.style.top = `${b.y * scale}px`
     el.style.width = `${Math.max(2, b.w * scale)}px`
@@ -467,11 +571,10 @@ function scrollHunkIntoView(target: FlatHunk): void {
 }
 
 function drawConnectors(): void {
-  // Connector design: thin Bezier curves confined to the gutter between the two panes
-  // (X anchored at the panes' inner edges, never over the canvas content). Y matches
-  // each hunk's vertical position on its side, clamped to the visible viewport so
-  // off-screen hunks terminate at the gutter top/bottom edge instead of bleeding into
-  // adjacent UI. Inspired by VSCode/Meld/Beyond Compare diff connectors.
+  // Renders one ribbon + two rails per HunkGroup (groups computed in useCompareDiff,
+  // so the same identity threads through paint overlays and the sidebar).
+  // Visual elements get data-group-id so hover anywhere in the group activates all of
+  // them simultaneously (cross-linked highlight).
   const svg = connectorsEl.value
   const body = bodyEl.value
   if (!svg || !body) return
@@ -479,7 +582,7 @@ function drawConnectors(): void {
 
   const c = pdf.compare
   const d = c.diffs[c.currentPage]
-  if (!d || !d.hunks || !d.hunks.length) return
+  if (!d || !d.groups || !d.groups.length) return
 
   const bRect = body.getBoundingClientRect()
   svg.setAttribute('viewBox', `0 0 ${bRect.width} ${bRect.height}`)
@@ -496,7 +599,6 @@ function drawConnectors(): void {
   const ls = leftScale || 1
   const rs = rightScale || 1
 
-  // X: pane inner edges (gutter only). Y: hunk position on its side, clamped.
   const lx = lwRect.right - bRect.left
   const rx = rwRect.left - bRect.left
   const lyMin = lwRect.top - bRect.top
@@ -508,48 +610,80 @@ function drawConnectors(): void {
     return Math.max(lo, Math.min(hi, v))
   }
 
+  function paneRange(
+    boxes: DiffBox[],
+    canvasTop: number,
+    scale: number,
+  ): { top: number; bottom: number } | null {
+    if (!boxes.length) return null
+    const u = unionBox(boxes)
+    const top = canvasTop + u.y * scale - bRect.top
+    const bottom = top + u.h * scale
+    return { top, bottom }
+  }
+
+  const MIN_RIBBON_HEIGHT = 6
   const frag = document.createDocumentFragment()
-  for (const h of d.hunks) {
-    const hasL = h.leftBoxes.length
-    const hasR = h.rightBoxes.length
-    if (!hasL && !hasR) continue
-    const kind = h.kind || (hasL && hasR ? 'changed' : hasL ? 'removed' : 'added')
+  for (const g of d.groups) {
+    const left = paneRange(g.leftBoxes, lcRect.top, ls)
+    const right = paneRange(g.rightBoxes, rcRect.top, rs)
+    if (!left && !right) continue
+    const leftTop = left?.top ?? right!.top
+    const leftBot = left?.bottom ?? right!.bottom
+    const rightTop = right?.top ?? left!.top
+    const rightBot = right?.bottom ?? left!.bottom
 
-    let leftY: number
-    let rightY: number
-    if (hasL) {
-      const u = unionBox(h.leftBoxes)
-      leftY = lcRect.top + (u.y + u.h / 2) * ls - bRect.top
-    } else {
-      const u = unionBox(h.rightBoxes)
-      leftY = rcRect.top + (u.y + u.h / 2) * rs - bRect.top
-    }
-    if (hasR) {
-      const u = unionBox(h.rightBoxes)
-      rightY = rcRect.top + (u.y + u.h / 2) * rs - bRect.top
-    } else {
-      const u = unionBox(h.leftBoxes)
-      rightY = lcRect.top + (u.y + u.h / 2) * ls - bRect.top
-    }
-
-    // Skip when both ends are fully outside their pane's viewport.
-    const lOutside = leftY < lyMin - 4 || leftY > lyMax + 4
-    const rOutside = rightY < ryMin - 4 || rightY > ryMax + 4
+    const lOutside = leftBot < lyMin - 4 || leftTop > lyMax + 4
+    const rOutside = rightBot < ryMin - 4 || rightTop > ryMax + 4
     if (lOutside && rOutside) continue
 
-    const ly = clamp(leftY, lyMin, lyMax)
-    const ry = clamp(rightY, ryMin, ryMax)
+    let lt = clamp(leftTop, lyMin, lyMax)
+    let lb = clamp(leftBot, lyMin, lyMax)
+    let rt = clamp(rightTop, ryMin, ryMax)
+    let rb = clamp(rightBot, ryMin, ryMax)
+    if (lb - lt < MIN_RIBBON_HEIGHT) {
+      const cy = (lt + lb) / 2
+      lt = cy - MIN_RIBBON_HEIGHT / 2
+      lb = cy + MIN_RIBBON_HEIGHT / 2
+    }
+    if (rb - rt < MIN_RIBBON_HEIGHT) {
+      const cy = (rt + rb) / 2
+      rt = cy - MIN_RIBBON_HEIGHT / 2
+      rb = cy + MIN_RIBBON_HEIGHT / 2
+    }
 
-    // Horizontal-tangent Bezier through the gutter — very small horizontal span keeps
-    // the curve compact and unambiguous about which Y maps to which Y.
     const mx = (lx + rx) / 2
-    const path = `M ${lx.toFixed(1)},${ly.toFixed(1)} C ${mx.toFixed(1)},${ly.toFixed(
+    const top = `M ${lx.toFixed(1)},${lt.toFixed(1)} C ${mx.toFixed(1)},${lt.toFixed(
       1,
-    )} ${mx.toFixed(1)},${ry.toFixed(1)} ${rx.toFixed(1)},${ry.toFixed(1)}`
-    const el = document.createElementNS(SVG_NS, 'path')
-    el.setAttribute('d', path)
-    el.setAttribute('class', kind)
-    frag.appendChild(el)
+    )} ${mx.toFixed(1)},${rt.toFixed(1)} ${rx.toFixed(1)},${rt.toFixed(1)}`
+    const rightEdge = ` L ${rx.toFixed(1)},${rb.toFixed(1)}`
+    const bottom = ` C ${mx.toFixed(1)},${rb.toFixed(1)} ${mx.toFixed(1)},${lb.toFixed(
+      1,
+    )} ${lx.toFixed(1)},${lb.toFixed(1)}`
+    const close = ' Z'
+    const ribbon = document.createElementNS(SVG_NS, 'path')
+    ribbon.setAttribute('d', top + rightEdge + bottom + close)
+    ribbon.setAttribute('class', `ribbon ${g.kind}`)
+    ribbon.setAttribute('data-group-id', String(g.id))
+    frag.appendChild(ribbon)
+
+    const lRail = document.createElementNS(SVG_NS, 'rect')
+    lRail.setAttribute('x', String(lx - 3))
+    lRail.setAttribute('y', lt.toFixed(1))
+    lRail.setAttribute('width', '3')
+    lRail.setAttribute('height', Math.max(2, lb - lt).toFixed(1))
+    lRail.setAttribute('class', `rail ${g.kind}`)
+    lRail.setAttribute('data-group-id', String(g.id))
+    frag.appendChild(lRail)
+
+    const rRail = document.createElementNS(SVG_NS, 'rect')
+    rRail.setAttribute('x', String(rx))
+    rRail.setAttribute('y', rt.toFixed(1))
+    rRail.setAttribute('width', '3')
+    rRail.setAttribute('height', Math.max(2, rb - rt).toFixed(1))
+    rRail.setAttribute('class', `rail ${g.kind}`)
+    rRail.setAttribute('data-group-id', String(g.id))
+    frag.appendChild(rRail)
   }
   svg.appendChild(frag)
 }
@@ -597,12 +731,23 @@ function onResize() {
 }
 
 let scrollSyncCleanup: (() => void) | null = null
+let hoverCleanups: Array<() => void> = []
+
+function attachHoverBindings(): void {
+  for (const fn of hoverCleanups) fn()
+  hoverCleanups = []
+  hoverCleanups.push(bindHover(leftOverlayEl.value))
+  hoverCleanups.push(bindHover(rightOverlayEl.value))
+  hoverCleanups.push(bindHover(connectorsEl.value))
+  hoverCleanups.push(bindHover(diffListEl.value))
+}
 
 onMounted(async () => {
   refreshPaneState()
   scrollSyncCleanup = setupScrollSync()
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('resize', onResize)
+  attachHoverBindings()
   // If sides are already loaded (returning to the screen), redraw previews.
   if (pdf.compare.left) await renderSidePreview('left')
   if (pdf.compare.right) await renderSidePreview('right')
@@ -618,7 +763,18 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('resize', onResize)
   scrollSyncCleanup?.()
+  for (const fn of hoverCleanups) fn()
 })
+
+// Re-bind sidebar hover when the sidebar mounts/unmounts.
+watch(showDiffList, () => {
+  void nextTickRebind()
+})
+
+async function nextTickRebind(): Promise<void> {
+  await new Promise(requestAnimationFrame)
+  attachHoverBindings()
+}
 
 watch(
   () => pdf.compare.zoom,
@@ -718,6 +874,32 @@ watch(
           </svg>
           Compare
         </UiButton>
+        <UiButton
+          variant="ghost"
+          size="icon"
+          class="h-8 w-8"
+          :toggled="showDiffList"
+          :title="showDiffList ? 'Hide diff list' : 'Show diff list'"
+          @click="showDiffList = !showDiffList"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <line x1="8" y1="6" x2="21" y2="6" />
+            <line x1="8" y1="12" x2="21" y2="12" />
+            <line x1="8" y1="18" x2="21" y2="18" />
+            <circle cx="4" cy="6" r="1.2" />
+            <circle cx="4" cy="12" r="1.2" />
+            <circle cx="4" cy="18" r="1.2" />
+          </svg>
+        </UiButton>
       </div>
     </header>
 
@@ -770,7 +952,53 @@ watch(
       </div>
     </div>
 
-    <div ref="bodyEl" class="compare-body min-h-0 flex-1">
+    <div class="compare-main flex min-h-0 flex-1 gap-3">
+      <aside
+        v-if="showDiffList && sidebarEntries.length > 0"
+        ref="diffListEl"
+        class="diff-list glass min-h-0 w-[280px] flex-shrink-0 overflow-hidden rounded-[14px]"
+      >
+        <header
+          class="border-b border-white/[0.06] px-4 py-3 text-xs font-semibold uppercase tracking-[0.5px] text-fg-dim"
+        >
+          Changes
+          <span
+            class="ml-auto inline-block rounded-md border border-glass-border bg-glass-strong px-2 py-0.5 text-[10px] font-medium text-fg"
+          >
+            {{ sidebarEntries.length }}
+          </span>
+        </header>
+        <div class="diff-list-scroll flex h-[calc(100%-44px)] flex-col gap-1 overflow-y-auto p-2">
+          <button
+            v-for="e in sidebarEntries"
+            :key="`${e.page}:${e.groupId}`"
+            type="button"
+            class="diff-entry"
+            :class="['k-' + e.kind, { current: e.page === pdf.compare.currentPage }]"
+            :data-group-id="e.page === pdf.compare.currentPage ? e.groupId : null"
+            :data-group-page="e.page"
+            @click="jumpToEntry(e)"
+          >
+            <span class="diff-entry-meta">
+              <span class="diff-entry-page">p.{{ e.page + 1 }}</span>
+              <span class="diff-entry-kind" :class="e.kind">{{ e.kind }}</span>
+            </span>
+            <span v-if="e.kind === 'changed'" class="diff-entry-text">
+              <span class="from">{{ e.leftText || '—' }}</span>
+              <span class="arrow">→</span>
+              <span class="to">{{ e.rightText || '—' }}</span>
+            </span>
+            <span v-else-if="e.kind === 'added'" class="diff-entry-text">
+              <span class="op">+</span><span class="to">{{ e.rightText || '(visual change)' }}</span>
+            </span>
+            <span v-else-if="e.kind === 'removed'" class="diff-entry-text">
+              <span class="op">−</span><span class="from">{{ e.leftText || '(visual change)' }}</span>
+            </span>
+          </button>
+        </div>
+      </aside>
+
+      <div ref="bodyEl" class="compare-body min-h-0 flex-1">
       <div ref="leftPaneEl" class="compare-pane glass empty">
         <div class="compare-pane-header">
           <span class="dot left" />
@@ -860,6 +1088,7 @@ watch(
       </div>
 
       <svg ref="connectorsEl" class="compare-connectors" preserveAspectRatio="none" />
+      </div>
     </div>
 
     <div
@@ -934,12 +1163,145 @@ watch(
 </template>
 
 <style scoped>
+.compare-main {
+  /* Hosts the optional left-side diff-list and the two-pane body. Flex lets the
+   * sidebar collapse to nothing when hidden without affecting body sizing. */
+}
 .compare-body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   /* Wider gutter so Bezier connectors have room to communicate Y movement clearly. */
   gap: 28px;
   position: relative;
+}
+
+/* ===== Diff-list sidebar ===== */
+.diff-list {
+  display: flex;
+  flex-direction: column;
+  animation: slide-in-x 0.18s var(--ease-out-soft);
+}
+@keyframes slide-in-x {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.diff-list header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.diff-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--color-fg);
+  transition: background 0.12s var(--ease-out-soft), border-color 0.12s var(--ease-out-soft),
+    transform 0.12s var(--ease-out-soft);
+}
+.diff-entry:hover {
+  background: var(--color-glass-strong);
+  border-color: var(--color-glass-border);
+  transform: translateX(2px);
+}
+.diff-entry.current::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--color-accent);
+}
+.diff-entry {
+  position: relative;
+}
+.diff-entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-fg-mute);
+}
+.diff-entry-page {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--color-fg-dim);
+}
+.diff-entry-kind {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  font-size: 9px;
+}
+.diff-entry-kind.changed {
+  color: rgba(250, 204, 21, 0.95);
+  background: rgba(250, 204, 21, 0.16);
+}
+.diff-entry-kind.removed {
+  color: rgba(252, 165, 165, 1);
+  background: rgba(239, 68, 68, 0.18);
+}
+.diff-entry-kind.added {
+  color: rgba(134, 239, 172, 1);
+  background: rgba(34, 197, 94, 0.18);
+}
+.diff-entry-text {
+  font-size: 12px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.diff-entry-text .from {
+  color: rgba(252, 165, 165, 0.95);
+  text-decoration: line-through;
+  text-decoration-color: rgba(239, 68, 68, 0.5);
+}
+.diff-entry-text .to {
+  color: rgba(134, 239, 172, 0.98);
+}
+.diff-entry-text .arrow {
+  margin: 0 4px;
+  color: var(--color-fg-mute);
+  font-weight: 600;
+}
+.diff-entry-text .op {
+  display: inline-block;
+  width: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+}
+.diff-entry.k-added .diff-entry-text .op {
+  color: rgba(34, 197, 94, 0.95);
+}
+.diff-entry.k-removed .diff-entry-text .op {
+  color: rgba(239, 68, 68, 0.95);
+}
+
+/* Hover-cross-link: any element carrying data-group-id with the .diff-active class
+ * lights up. Set imperatively in CompareScreen.vue when hoveredGroupId changes. */
+.diff-entry.diff-active {
+  background: var(--color-glass-strong);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.15);
 }
 @media (max-width: 900px) {
   .compare-body {
@@ -1164,6 +1526,44 @@ watch(
   background: rgba(250, 204, 21, 0.4);
   outline: 1px solid rgba(202, 138, 4, 0.85);
 }
+
+/* Extended hover state — applied imperatively to every element sharing the hovered
+ * group's id (on-page diff boxes, ribbons, rails, sidebar entries). Stronger
+ * background, thicker outline, and a soft glow draw the eye to "this is the change
+ * you're inspecting" across both pages and the gutter at once. */
+.compare-overlay .diff-box.diff-active {
+  outline-width: 2px;
+  outline-offset: 1px;
+  z-index: 4;
+  animation: diff-glow 0.6s var(--ease-out-soft);
+  filter: brightness(1.15) saturate(1.2);
+}
+.compare-overlay .diff-box.diff-active.removed {
+  background: rgba(239, 68, 68, 0.65);
+  outline-color: rgba(220, 38, 38, 1);
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.25), 0 6px 18px rgba(220, 38, 38, 0.35);
+}
+.compare-overlay .diff-box.diff-active.added {
+  background: rgba(34, 197, 94, 0.65);
+  outline-color: rgba(22, 163, 74, 1);
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.25), 0 6px 18px rgba(22, 163, 74, 0.35);
+}
+.compare-overlay .diff-box.diff-active.changed {
+  background: rgba(250, 204, 21, 0.6);
+  outline-color: rgba(202, 138, 4, 1);
+  box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.25), 0 6px 18px rgba(202, 138, 4, 0.35);
+}
+@keyframes diff-glow {
+  0% {
+    transform: scale(0.96);
+  }
+  60% {
+    transform: scale(1.04);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
 @keyframes diff-pulse {
   from {
     opacity: 0;
@@ -1175,21 +1575,57 @@ watch(
   }
 }
 
-.compare-connectors path {
-  fill: none;
-  stroke-width: 1.25;
-  stroke-linecap: round;
-  opacity: 0.85;
+/* Filled ribbons connecting matched diff regions across the gutter. */
+.compare-connectors path.ribbon {
+  stroke-width: 1;
+  opacity: 0.55;
+  transition: opacity 0.15s var(--ease-out-soft), stroke-width 0.15s var(--ease-out-soft);
 }
-.compare-connectors path.changed {
-  stroke: rgba(250, 204, 21, 0.85);
+.compare-connectors path.ribbon.changed {
+  fill: rgba(250, 204, 21, 0.28);
+  stroke: rgba(202, 138, 4, 0.7);
 }
-.compare-connectors path.removed {
-  stroke: rgba(239, 68, 68, 0.7);
-  stroke-dasharray: 3 3;
+.compare-connectors path.ribbon.removed {
+  fill: rgba(239, 68, 68, 0.22);
+  stroke: rgba(220, 38, 38, 0.6);
 }
-.compare-connectors path.added {
-  stroke: rgba(34, 197, 94, 0.7);
-  stroke-dasharray: 3 3;
+.compare-connectors path.ribbon.added {
+  fill: rgba(34, 197, 94, 0.22);
+  stroke: rgba(22, 163, 74, 0.6);
+}
+.compare-connectors path.ribbon.diff-active {
+  opacity: 1;
+  stroke-width: 1.75;
+}
+.compare-connectors path.ribbon.diff-active.changed {
+  fill: rgba(250, 204, 21, 0.55);
+}
+.compare-connectors path.ribbon.diff-active.removed {
+  fill: rgba(239, 68, 68, 0.5);
+}
+.compare-connectors path.ribbon.diff-active.added {
+  fill: rgba(34, 197, 94, 0.5);
+}
+
+/* Gutter rails: solid colored bars on each pane's inner edge marking diff Y ranges. */
+.compare-connectors rect.rail {
+  rx: 1.5;
+  ry: 1.5;
+  transition: transform 0.15s var(--ease-out-soft);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.compare-connectors rect.rail.changed {
+  fill: rgba(250, 204, 21, 0.85);
+}
+.compare-connectors rect.rail.removed {
+  fill: rgba(239, 68, 68, 0.85);
+}
+.compare-connectors rect.rail.added {
+  fill: rgba(34, 197, 94, 0.85);
+}
+.compare-connectors rect.rail.diff-active {
+  transform: scaleX(2);
+  filter: brightness(1.2);
 }
 </style>

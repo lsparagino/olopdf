@@ -61,10 +61,17 @@ function onMouseDown(e: MouseEvent) {
   }
   // Inline editor active: don't preventDefault — let blur commit the editor cleanly.
   if (isEditorActive()) return
-  // A click inside a text-layer span belongs to the browser's text selection.
-  const layer = textLayerEl.value
-  if (layer && layer !== e.target && layer.contains(e.target as Node)) return
+  // Select mode: never start panning — the browser handles text selection on spans,
+  // and clicks outside text are inert. Pan mode: always pan (when scrollable).
+  if (pdf.interactionMode === 'select') return
   zoom.startPan(e)
+}
+
+function onSetSelectMode() {
+  pdf.setInteractionMode('select')
+}
+function onSetPanMode() {
+  pdf.setInteractionMode('pan')
 }
 
 function onAddText() {
@@ -117,6 +124,42 @@ function onPageRendered() {
   highlightActiveSidebarThumb()
 }
 
+// pdf.js TextLayerBuilder#bindMouse, distilled. On mousedown inside the layer the
+// `endOfContent` sentinel is moved so its top edge sits at the click's Y position
+// (as a percentage of the layer height). The sentinel covers everything below the
+// click and has user-select: none, so once the cursor strays past the bottom of
+// the spans the browser can't extend the selection there — it freezes at the last
+// valid span. On mouseup we revert. Without this trick, dragging past the text
+// snaps the selection to the topmost or bottommost span on the page.
+function onTextLayerMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return
+  const layer = textLayerEl.value
+  if (!layer) return
+  const end = layer.querySelector<HTMLDivElement>('.end-of-content')
+  if (!end) return
+  // adjustTop is only meaningful when the click landed on a text run (not the
+  // empty layer); in Firefox the -moz-user-select check skips the dynamic
+  // positioning since user-select: none on the sentinel is enough there.
+  let adjustTop = e.target !== layer
+  adjustTop &&=
+    getComputedStyle(end).getPropertyValue('-moz-user-select') !== 'none'
+  if (adjustTop) {
+    const layerRect = layer.getBoundingClientRect()
+    const r = Math.max(0, (e.pageY - layerRect.top) / layerRect.height)
+    end.style.top = `${(r * 100).toFixed(2)}%`
+  }
+  end.classList.add('active')
+}
+
+function onTextLayerMouseUp() {
+  const layer = textLayerEl.value
+  if (!layer) return
+  const end = layer.querySelector<HTMLDivElement>('.end-of-content')
+  if (!end) return
+  end.style.top = ''
+  end.classList.remove('active')
+}
+
 function highlightActiveSidebarThumb() {
   const list = pageListEl.value
   if (!list) return
@@ -145,7 +188,146 @@ function onGridThumbDoubleClick(uiIdx: number) {
 }
 
 function onBookmarkClick(b: Bookmark) {
+  if (bookmarkDragMoved) return
   void gotoBookmark(b)
+}
+
+// Right sidebar width is user-resizable; persisted across sessions so a
+// well-tuned width sticks. The inline CSS variable on the section drives the
+// grid track.
+const SIDEBAR_KEY = 'olopdf:right-sidebar-width'
+const SIDEBAR_MIN = 200
+const SIDEBAR_MAX = 600
+const SIDEBAR_DEFAULT = 280
+const rightSidebarWidth = ref<number>(loadSidebarWidth())
+
+function loadSidebarWidth(): number {
+  try {
+    const v = Number(localStorage.getItem(SIDEBAR_KEY))
+    if (Number.isFinite(v) && v >= SIDEBAR_MIN && v <= SIDEBAR_MAX) return v
+  } catch {
+    /* ignore */
+  }
+  return SIDEBAR_DEFAULT
+}
+
+function onSidebarResizeStart(e: MouseEvent) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  const startX = e.clientX
+  const startW = rightSidebarWidth.value
+  document.body.classList.add('resizing-sidebar')
+  function onMove(ev: MouseEvent) {
+    // Dragging the handle leftwards widens the sidebar (the handle lives on
+    // its left edge, and the panel is anchored to the right of the screen).
+    const next = Math.max(
+      SIDEBAR_MIN,
+      Math.min(SIDEBAR_MAX, startW - (ev.clientX - startX)),
+    )
+    rightSidebarWidth.value = next
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    document.body.classList.remove('resizing-sidebar')
+    try {
+      localStorage.setItem(SIDEBAR_KEY, String(rightSidebarWidth.value))
+    } catch {
+      /* ignore */
+    }
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+// Bookmark hierarchy: order is auto-sorted by page position (page → y → x), so
+// the only thing the user controls is each bookmark's outline level. They can
+// either click the indent/outdent buttons or drag the row horizontally — one
+// tier per BOOKMARK_INDENT_PX of cursor X movement, clamped to the predecessor's
+// level + 1 so the tree never grows a gap.
+const BOOKMARK_INDENT_PX = 22
+const BOOKMARK_BASE_PADDING = 12
+const DRAG_THRESHOLD_PX = 4
+const dragSrcIdx = ref<number | null>(null)
+const dragPreviewLevel = ref<number | null>(null)
+const dragGhost = ref<{ x: number; y: number; title: string } | null>(null)
+
+let bookmarkDragMoved = false
+
+function bookmarkPaddingPx(level: number): number {
+  return BOOKMARK_BASE_PADDING + level * BOOKMARK_INDENT_PX
+}
+
+function maxLevelAt(idx: number): number {
+  if (idx <= 0) return 0
+  return pdf.bookmarks[idx - 1].level + 1
+}
+
+function indentBookmark(i: number) {
+  const cur = pdf.bookmarks[i].level
+  const cap = maxLevelAt(i)
+  if (cur >= cap) return
+  pdf.setBookmarkLevel(i, cur + 1)
+}
+function outdentBookmark(i: number) {
+  const cur = pdf.bookmarks[i].level
+  if (cur <= 0) return
+  pdf.setBookmarkLevel(i, cur - 1)
+}
+
+function onBookmarkMouseDown(e: MouseEvent, i: number) {
+  if (e.button !== 0) return
+  const tgt = e.target as HTMLElement
+  if (tgt.closest('.bm-action, .bm-title-input')) return
+  if (editingBookmarkIdx.value !== null) return
+
+  const startX = e.clientX
+  const startY = e.clientY
+  const startLevel = pdf.bookmarks[i].level
+  bookmarkDragMoved = false
+  let armed = false
+
+  function onMove(ev: MouseEvent) {
+    const dx = ev.clientX - startX
+    const dy = ev.clientY - startY
+    if (!armed) {
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return
+      armed = true
+      bookmarkDragMoved = true
+      dragSrcIdx.value = i
+    }
+    dragGhost.value = { x: ev.clientX, y: ev.clientY, title: pdf.bookmarks[i].title }
+    const deltaTiers = Math.round(dx / BOOKMARK_INDENT_PX)
+    const target = Math.max(0, Math.min(maxLevelAt(i), startLevel + deltaTiers))
+    dragPreviewLevel.value = target
+  }
+
+  function onUp() {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    if (armed) {
+      const next = dragPreviewLevel.value
+      if (typeof next === 'number' && next !== startLevel) {
+        pdf.setBookmarkLevel(i, next)
+      }
+      // Swallow the trailing `click` so the drag doesn't navigate.
+      const blockClick = (clickEv: Event) => {
+        clickEv.stopPropagation()
+        clickEv.preventDefault()
+        document.removeEventListener('click', blockClick, true)
+      }
+      document.addEventListener('click', blockClick, true)
+      setTimeout(() => {
+        bookmarkDragMoved = false
+      }, 0)
+    }
+    dragSrcIdx.value = null
+    dragGhost.value = null
+    dragPreviewLevel.value = null
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
 }
 
 function startBookmarkEdit(idx: number, b: Bookmark) {
@@ -159,7 +341,6 @@ function startBookmarkEdit(idx: number, b: Bookmark) {
 function commitBookmarkEdit() {
   if (editingBookmarkIdx.value === null) return
   pdf.renameBookmark(editingBookmarkIdx.value, editingBookmarkTitle.value)
-  pdf.sortBookmarks()
   editingBookmarkIdx.value = null
 }
 
@@ -196,6 +377,8 @@ onMounted(async () => {
 
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('pdf:page-rendered', onPageRendered)
+  textLayerEl.value?.addEventListener('mousedown', onTextLayerMouseDown)
+  textLayerEl.value?.addEventListener('mouseup', onTextLayerMouseUp)
 
   // If the user landed on /editor without a loaded doc, bounce back to welcome.
   if (!pdf.pdfjsDoc) {
@@ -209,6 +392,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('pdf:page-rendered', onPageRendered)
+  textLayerEl.value?.removeEventListener('mousedown', onTextLayerMouseDown)
+  textLayerEl.value?.removeEventListener('mouseup', onTextLayerMouseUp)
   // Clear refs so other screens don't accidentally read stale DOM.
   refs.canvasWrap.value = null
   refs.canvasStage.value = null
@@ -219,7 +404,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="editor grid h-full grid-rows-1 gap-3 p-3">
+  <section
+    class="editor grid h-full grid-rows-1 gap-3 p-3"
+    :style="{ '--right-sidebar-width': `${rightSidebarWidth}px` }"
+  >
     <aside
       class="glass left-sidebar flex min-h-0 flex-col overflow-hidden rounded-[14px]"
     >
@@ -384,41 +572,105 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div
-        ref="canvasWrapEl"
-        class="canvas-wrap"
-        :class="{ 'grid-mode': pdf.gridMode }"
-        @wheel="zoom.onWheel"
-        @mousedown="onMouseDown"
-      >
-        <div ref="canvasStageEl" class="canvas-stage">
-          <canvas ref="pdfCanvasEl" />
-          <div ref="textLayerEl" class="text-layer" />
-          <div ref="textOverlayEl" class="text-overlay" />
-        </div>
-        <TransitionGroup
-          v-if="pdf.gridMode"
-          tag="div"
-          name="page-reorder"
-          class="grid-view"
+      <!-- Wrapper exists so the mode-toggle can be positioned absolutely without
+           living inside the scroll container — otherwise it scrolls out of view
+           when the user zooms in and the canvas overflows. -->
+      <div class="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div
+          ref="canvasWrapEl"
+          class="canvas-wrap"
+          :class="[
+            { 'grid-mode': pdf.gridMode },
+            `mode-${pdf.interactionMode}`,
+          ]"
+          @wheel="zoom.onWheel"
+          @mousedown="onMouseDown"
         >
-          <PageThumb
-            v-for="(origIdx, ui) in pdf.pageOrder"
-            :key="origIdx"
-            :ui-idx="ui"
-            :orig-idx="origIdx"
-            :active="ui === pdf.currentPage"
-            :target-width="PDF_CONFIG.GRID_THUMB_TARGET_WIDTH"
-            variant="grid"
-            @dblclick="onGridThumbDoubleClick(ui)"
-            @delete="deletePage(ui)"
-            @dragstart="gridDrag.onDragStart($event, ui)"
-            @dragend="gridDrag.onDragEnd"
-            @dragover="gridDrag.onDragOver($event, ui)"
-            @dragleave="gridDrag.onDragLeave"
-            @drop="gridDrag.onDrop($event, ui, 'x')"
-          />
-        </TransitionGroup>
+          <div ref="canvasStageEl" class="canvas-stage">
+            <canvas ref="pdfCanvasEl" />
+            <div ref="textLayerEl" class="text-layer" />
+            <div ref="textOverlayEl" class="text-overlay" />
+          </div>
+          <TransitionGroup
+            v-if="pdf.gridMode"
+            tag="div"
+            name="page-reorder"
+            class="grid-view"
+          >
+            <PageThumb
+              v-for="(origIdx, ui) in pdf.pageOrder"
+              :key="origIdx"
+              :ui-idx="ui"
+              :orig-idx="origIdx"
+              :active="ui === pdf.currentPage"
+              :target-width="PDF_CONFIG.GRID_THUMB_TARGET_WIDTH"
+              variant="grid"
+              @dblclick="onGridThumbDoubleClick(ui)"
+              @delete="deletePage(ui)"
+              @dragstart="gridDrag.onDragStart($event, ui)"
+              @dragend="gridDrag.onDragEnd"
+              @dragover="gridDrag.onDragOver($event, ui)"
+              @dragleave="gridDrag.onDragLeave"
+              @drop="gridDrag.onDrop($event, ui, 'x')"
+            />
+          </TransitionGroup>
+        </div>
+
+        <div
+          v-if="!pdf.gridMode"
+          class="mode-toggle"
+          @mousedown.stop
+        >
+          <button
+            type="button"
+            class="mode-btn"
+            :class="{ active: pdf.interactionMode === 'select' }"
+            title="Select text"
+            @click="onSetSelectMode"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <line x1="4" y1="5" x2="12" y2="5" />
+              <line x1="20" y1="5" x2="12" y2="5" />
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="4" y1="19" x2="12" y2="19" />
+              <line x1="20" y1="19" x2="12" y2="19" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="mode-btn"
+            :class="{ active: pdf.interactionMode === 'pan' }"
+            title="Pan"
+            @click="onSetPanMode"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M18 11V6.5a1.5 1.5 0 0 0-3 0V11" />
+              <path d="M15 10.5V4.5a1.5 1.5 0 0 0-3 0v6.5" />
+              <path d="M12 10.5V5.5a1.5 1.5 0 0 0-3 0v8" />
+              <path d="M9 13.5V8.5a1.5 1.5 0 0 0-3 0V16l1.5 3a5.5 5.5 0 0 0 5 3h2a5.5 5.5 0 0 0 5.5-5.5V11a1.5 1.5 0 0 0-3 0" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div
@@ -501,12 +753,24 @@ onBeforeUnmount(() => {
     </main>
 
     <aside
-      class="glass right-sidebar flex min-h-0 flex-col overflow-hidden rounded-[14px]"
+      class="glass right-sidebar relative flex min-h-0 flex-col overflow-hidden rounded-[14px]"
     >
       <div
-        class="border-b border-white/[0.06] px-4 py-3.5 text-xs font-semibold uppercase tracking-[0.5px] text-fg-dim"
+        class="right-sidebar-resize"
+        title="Drag to resize"
+        @mousedown="onSidebarResizeStart"
+      />
+      <div
+        class="flex items-center justify-between border-b border-white/[0.06] px-4 py-3.5 text-xs font-semibold uppercase tracking-[0.5px] text-fg-dim"
       >
-        Bookmarks
+        <span>Bookmarks</span>
+        <span
+          v-if="pdf.bookmarks.length > 1"
+          class="text-[10px] font-normal normal-case tracking-normal text-fg-mute"
+          title="Drag a row right/left or use the indent buttons to change its outline level."
+        >
+          drag to nest
+        </span>
       </div>
       <div class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-2.5">
         <div
@@ -519,10 +783,27 @@ onBeforeUnmount(() => {
           v-for="(b, i) in pdf.bookmarks"
           :key="`bm-${i}-${b.title}`"
           class="bookmark-item"
-          :class="{ editing: editingBookmarkIdx === i }"
+          :class="{
+            editing: editingBookmarkIdx === i,
+            dragging: dragSrcIdx === i,
+          }"
+          :style="{
+            paddingLeft: `${bookmarkPaddingPx(
+              dragSrcIdx === i && dragPreviewLevel !== null ? dragPreviewLevel : b.level,
+            )}px`,
+          }"
+          :data-bm-idx="i"
+          @mousedown="onBookmarkMouseDown($event, i)"
           @click="onBookmarkClick(b)"
           @dblclick.stop="startBookmarkEdit(i, b)"
         >
+          <span
+            v-for="k in (dragSrcIdx === i && dragPreviewLevel !== null ? dragPreviewLevel : b.level)"
+            :key="`g${k}`"
+            class="bm-guide"
+            :style="{ left: `${BOOKMARK_BASE_PADDING + (k - 1) * BOOKMARK_INDENT_PX + 4}px` }"
+            aria-hidden="true"
+          />
           <span
             v-if="b.x !== undefined"
             class="bm-anchor"
@@ -547,9 +828,54 @@ onBeforeUnmount(() => {
           </span>
           <button
             type="button"
-            class="bm-edit"
+            class="bm-action bm-outdent"
+            title="Outdent"
+            :disabled="b.level === 0"
+            @click.stop="outdentBookmark(i)"
+            @mousedown.stop
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="11 17 6 12 11 7" />
+              <line x1="18" y1="12" x2="6" y2="12" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="bm-action bm-indent"
+            title="Indent"
+            :disabled="b.level >= maxLevelAt(i)"
+            @click.stop="indentBookmark(i)"
+            @mousedown.stop
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="13 17 18 12 13 7" />
+              <line x1="6" y1="12" x2="18" y2="12" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="bm-action bm-edit"
             title="Rename"
             @click.stop="startBookmarkEdit(i, b)"
+            @mousedown.stop
           >
             <svg
               viewBox="0 0 24 24"
@@ -567,9 +893,10 @@ onBeforeUnmount(() => {
           </button>
           <button
             type="button"
-            class="bm-del"
+            class="bm-action bm-del"
             title="Remove"
             @click.stop="pdf.removeBookmark(i)"
+            @mousedown.stop
           >
             ×
           </button>
@@ -586,16 +913,25 @@ onBeforeUnmount(() => {
     <Teleport to="body">
       <SelectionToolbar @bookmark="onAddBookmark" />
     </Teleport>
+    <Teleport to="body">
+      <div
+        v-if="dragGhost"
+        class="bookmark-ghost"
+        :style="{ left: `${dragGhost.x + 14}px`, top: `${dragGhost.y - 12}px` }"
+      >
+        {{ dragGhost.title }}
+      </div>
+    </Teleport>
   </section>
 </template>
 
 <style scoped>
 .editor {
-  grid-template-columns: 240px 1fr 280px;
+  grid-template-columns: 240px 1fr var(--right-sidebar-width, 280px);
 }
 @media (max-width: 1100px) {
   .editor {
-    grid-template-columns: 200px 1fr 240px;
+    grid-template-columns: 200px 1fr var(--right-sidebar-width, 240px);
   }
 }
 @media (max-width: 900px) {
@@ -605,6 +941,35 @@ onBeforeUnmount(() => {
   .right-sidebar {
     display: none;
   }
+}
+
+/* Vertical drag-handle on the left edge of the right sidebar. Starts subtle
+ * (just a cursor change on hover) and lights up while actively dragging. */
+.right-sidebar-resize {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 5;
+  transition: background 0.15s var(--ease-out-soft);
+}
+.right-sidebar-resize::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 1px;
+  width: 2px;
+  height: 28px;
+  border-radius: 2px;
+  transform: translateY(-50%);
+  background: transparent;
+  transition: background 0.15s var(--ease-out-soft);
+}
+.right-sidebar-resize:hover::before,
+:global(body.resizing-sidebar) .right-sidebar-resize::before {
+  background: var(--color-accent);
 }
 
 /* Canvas-wrap — precise positioning is required, scoped block holds the legacy CSS verbatim. */
@@ -624,6 +989,45 @@ onBeforeUnmount(() => {
 .canvas-wrap.placing-text,
 .canvas-wrap.placing-text * {
   cursor: crosshair !important;
+}
+
+/* Floating mode toggle, pinned to the top-left of the canvas-wrap. Stays in viewport
+ * while the page scrolls because canvas-wrap is the scroll container; we want the
+ * toggle to scroll with the page if content overflows, so position: absolute (not
+ * sticky) is the right choice — it sits flush with the inner padding box. */
+.mode-toggle {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 4;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(20, 20, 32, 0.78);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-glass-border);
+  border-radius: 9px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.mode-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-fg-dim);
+  cursor: pointer;
+  transition: background 0.12s var(--ease-out-soft), color 0.12s var(--ease-out-soft);
+}
+.mode-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-fg);
+}
+.mode-btn.active {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+  color: #fff;
 }
 .canvas-stage {
   position: relative;
@@ -671,23 +1075,82 @@ onBeforeUnmount(() => {
   transition: none;
 }
 
-/* Bookmark items */
+/* Bookmark items. paddingLeft is set inline from the outline level so children
+ * sit visibly under their parent. Order is auto-sorted by page position; the
+ * only thing the user controls per-row is its outline level — by dragging the
+ * row horizontally or by clicking the indent / outdent action buttons. */
 .bookmark-item {
+  position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 8px 12px;
   border-radius: 8px;
   background: var(--color-glass);
   border: 1px solid transparent;
-  cursor: pointer;
-  transition: transform 0.15s var(--ease-out-soft), background 0.15s var(--ease-out-soft),
-    border-color 0.15s var(--ease-out-soft);
+  cursor: grab;
+  transition: padding-left 0.12s var(--ease-out-soft),
+    background 0.15s var(--ease-out-soft), border-color 0.15s var(--ease-out-soft);
+}
+.bookmark-item:active {
+  cursor: grabbing;
 }
 .bookmark-item:hover {
   background: var(--color-glass-strong);
   border-color: var(--color-glass-border);
-  transform: translateX(2px);
+}
+.bookmark-item.dragging {
+  opacity: 0.35;
+  background: var(--color-glass);
+  border-color: transparent;
+}
+/* Indent guide: one thin vertical rail per ancestor level. Drawn as a low-
+ * contrast gradient that fades at the very top and bottom — softer than a hard
+ * solid line, and extending past the row gap so the rails on consecutive
+ * sibling rows blend into a continuous tree spine. */
+.bm-guide {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(167, 139, 250, 0.18) 18%,
+    rgba(167, 139, 250, 0.18) 82%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+.bookmark-item:hover .bm-guide,
+.bookmark-item.dragging .bm-guide {
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(167, 139, 250, 0.4) 18%,
+    rgba(167, 139, 250, 0.4) 82%,
+    transparent 100%
+  );
+}
+/* Floating label that follows the cursor while dragging. Gives a clear "you
+ * are dragging this thing" cue independent of the row's own state. */
+.bookmark-ghost {
+  position: fixed;
+  z-index: 200;
+  padding: 5px 10px;
+  background: rgba(20, 20, 32, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-accent);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-fg);
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
 }
 .bm-title {
   flex: 1;
@@ -718,33 +1181,42 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   margin-top: 2px;
 }
-.bm-edit,
-.bm-del {
+.bm-action {
   width: 22px;
   height: 22px;
   display: grid;
   place-items: center;
   border-radius: 6px;
-  opacity: 0;
   flex-shrink: 0;
-  transition: opacity 0.15s var(--ease-out-soft), background 0.15s var(--ease-out-soft);
+  color: var(--color-fg-dim);
+  transition: opacity 0.15s var(--ease-out-soft), background 0.15s var(--ease-out-soft),
+    color 0.15s var(--ease-out-soft);
   line-height: 1;
+  opacity: 0;
+}
+.bookmark-item:hover .bm-action,
+.bookmark-item.editing .bm-action {
+  opacity: 1;
+}
+.bm-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.25 !important;
+}
+.bm-action:not(:disabled):hover {
+  background: var(--color-glass-strong);
+  color: var(--color-fg);
+}
+.bm-indent:not(:disabled):hover,
+.bm-outdent:not(:disabled):hover,
+.bm-edit:not(:disabled):hover {
+  color: var(--color-accent);
 }
 .bm-del {
   font-size: 14px;
 }
-.bookmark-item:hover .bm-edit,
-.bookmark-item:hover .bm-del,
-.bookmark-item.editing .bm-edit,
-.bookmark-item.editing .bm-del {
-  opacity: 1;
-}
-.bm-edit:hover {
-  background: var(--color-glass-strong);
-  color: var(--color-accent);
-}
-.bm-del:hover {
+.bm-del:not(:disabled):hover {
   background: #e81123;
+  color: #fff;
 }
 .bm-anchor {
   display: inline-grid;
@@ -770,6 +1242,12 @@ body.text-dragging * {
   user-select: none !important;
 }
 
+body.resizing-sidebar,
+body.resizing-sidebar * {
+  cursor: ew-resize !important;
+  user-select: none !important;
+}
+
 /* Text layer — selectable text over the canvas */
 .text-layer {
   position: absolute;
@@ -779,7 +1257,7 @@ body.text-dragging * {
   line-height: 1;
   pointer-events: auto;
   z-index: 2;
-  cursor: grab;
+  cursor: text;
   forced-color-adjust: none;
   user-select: text !important;
   -webkit-user-select: text !important;
@@ -793,6 +1271,40 @@ body.text-dragging * {
   user-select: text !important;
   -webkit-user-select: text !important;
 }
+
+/* Pan mode: text-layer must not capture mousedowns or show a text cursor — the user
+ * wants to drag, not select. Disabling pointer-events lets clicks fall through to the
+ * canvas-wrap mousedown handler, which starts the pan. */
+.canvas-wrap.mode-pan {
+  cursor: grab;
+}
+/* pdf.js endOfContent technique. The sentinel sits below the spans (z-index: -1)
+ * with user-select: none. On mousedown its top is set to the click's Y % so it
+ * covers everything below the click; if the cursor strays past the bottom of the
+ * spans during the drag, it lands on this sentinel and the browser can't extend
+ * the selection — the selection freezes at the last valid span instead of
+ * snapping all the way to the end of the page. */
+.text-layer .end-of-content {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: -1;
+  cursor: default;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+.text-layer .end-of-content.active {
+  top: 0;
+}
+
+.canvas-wrap.mode-pan .text-layer,
+.canvas-wrap.mode-pan .text-layer span {
+  pointer-events: none;
+  cursor: grab;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
 .text-layer ::selection {
   background: rgba(167, 139, 250, 0.55);
   color: transparent;

@@ -124,6 +124,12 @@ async function renderTextLayer(
       if (angle !== 0) span.style.transform = `rotate(${angle}rad)`
       fragment.appendChild(span)
     }
+    // Sentinel used by the drag-selection clamp in EditorScreen.vue. Must be the
+    // last child of the text layer; its dynamic `top` positioning relies on it
+    // covering the area below the mousedown point.
+    const endOfContent = document.createElement('div')
+    endOfContent.className = 'end-of-content'
+    fragment.appendChild(endOfContent)
     layer.appendChild(fragment)
   } catch (e) {
     console.warn('Text layer render failed', e)

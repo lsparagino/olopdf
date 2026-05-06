@@ -36,6 +36,7 @@ function add() {
   pdf.addBookmark({
     title: t,
     pageOriginalIdx: pdf.pageOrder[pdf.currentPage],
+    level: 0,
     ...(sel ? { x: sel.x, y: sel.y } : {}),
   })
   pdf.capturedSelection = null
@@ -62,7 +63,7 @@ function onKeydown(e: KeyboardEvent) {
   <Transition name="modal">
     <div
       v-if="open"
-      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      class="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
       @click="onBackgroundClick"
     >
       <div

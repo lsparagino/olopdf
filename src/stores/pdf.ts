@@ -21,6 +21,10 @@ export interface Bookmark {
   pageOriginalIdx: number
   x?: number
   y?: number
+  // Outline depth. 0 = top level. A bookmark's level can be at most predecessor.level + 1
+  // (no skipping levels). Persisted as part of the user's manual ordering — auto-sort by
+  // page is no longer applied once hierarchy is in play.
+  level: number
 }
 
 export interface MergeFile {
@@ -72,6 +76,8 @@ interface PdfjsDocLike {
   getPage(pageNumber: number): Promise<unknown>
 }
 
+export type InteractionMode = 'select' | 'pan'
+
 export interface PdfStoreState {
   filePath: string | null
   pdfBytes: ArrayBuffer | null
@@ -90,6 +96,7 @@ export interface PdfStoreState {
   pendingTextPlacement: PendingTextPlacement | null
   capturedSelection: CapturedSelection | null
   gridMode: boolean
+  interactionMode: InteractionMode
   mergeFiles: MergeFile[]
   compare: CompareState
 }
@@ -147,6 +154,7 @@ export const usePdfStore = defineStore('pdf', {
     pendingTextPlacement: null,
     capturedSelection: null,
     gridMode: false,
+    interactionMode: 'select',
     mergeFiles: [],
     compare: initialCompareState(),
   }),
@@ -212,6 +220,7 @@ export const usePdfStore = defineStore('pdf', {
       this.pageOrder.splice(uiIdx, 1)
       this.textAnnotations = this.textAnnotations.filter((a) => a.pageOriginalIdx !== removedOrig)
       this.bookmarks = this.bookmarks.filter((b) => b.pageOriginalIdx !== removedOrig)
+      this.normalizeBookmarkLevels()
       delete this.pageRotations[removedOrig]
       this.thumbCache.delete(removedOrig)
       if (this.currentPage >= this.pageOrder.length) this.currentPage = this.pageOrder.length - 1
@@ -243,6 +252,9 @@ export const usePdfStore = defineStore('pdf', {
       if (this.currentPage === src) this.currentPage = target
       else if (src < this.currentPage && target >= this.currentPage) this.currentPage--
       else if (src > this.currentPage && target <= this.currentPage) this.currentPage++
+      // Bookmarks sort by page position; reorder pages → resort bookmarks → re-clamp levels.
+      this.sortBookmarks()
+      this.normalizeBookmarkLevels()
     },
 
     setCurrentPage(uiIdx: number) {
@@ -260,12 +272,18 @@ export const usePdfStore = defineStore('pdf', {
       this.gridMode = typeof force === 'boolean' ? force : !this.gridMode
     },
 
+    setInteractionMode(mode: InteractionMode) {
+      this.interactionMode = mode
+    },
+
     addBookmark(b: Bookmark) {
       this.bookmarks.push(b)
       this.sortBookmarks()
+      this.normalizeBookmarkLevels()
     },
     removeBookmark(idx: number) {
       this.bookmarks.splice(idx, 1)
+      this.normalizeBookmarkLevels()
     },
     renameBookmark(idx: number, title: string) {
       const t = title.trim()
@@ -282,6 +300,23 @@ export const usePdfStore = defineStore('pdf', {
         if (ya !== yb) return ya - yb
         return (a.x ?? 0) - (b.x ?? 0)
       })
+    },
+    setBookmarkLevel(idx: number, level: number) {
+      if (idx < 0 || idx >= this.bookmarks.length) return
+      this.bookmarks[idx].level = Math.max(0, level)
+      this.normalizeBookmarkLevels()
+    },
+    // Clamp every bookmark's level to (predecessor.level + 1) so the tree never
+    // has a gap (a level-2 with no level-1 ancestor). Run after any structural
+    // change.
+    normalizeBookmarkLevels() {
+      let prev = -1
+      for (const b of this.bookmarks) {
+        const max = prev + 1
+        if (b.level > max) b.level = max
+        if (b.level < 0) b.level = 0
+        prev = b.level
+      }
     },
 
     addTextAnnotation(ann: TextAnnotation) {

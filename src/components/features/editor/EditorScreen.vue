@@ -5,7 +5,13 @@ import UiButton from '@/components/ui/UiButton.vue'
 import PageThumb from '@/components/features/editor/PageThumb.vue'
 import BookmarkModal from '@/components/features/editor/BookmarkModal.vue'
 import SelectionToolbar from '@/components/features/editor/SelectionToolbar.vue'
-import { PDF_CONFIG, usePdfStore, type Bookmark } from '@/stores/pdf'
+import SearchBar from '@/components/features/editor/SearchBar.vue'
+import {
+  PDF_CONFIG,
+  usePdfStore,
+  type Bookmark,
+  type TextAnnotation,
+} from '@/stores/pdf'
 import { useEditorRefs } from '@/composables/useEditorRefs'
 import { renderCurrentPage } from '@/composables/usePdfRenderer'
 import { gotoPage, deletePage, movePage, rotatePage } from '@/composables/usePageActions'
@@ -13,6 +19,7 @@ import { useZoomPan } from '@/composables/useZoomPan'
 import { createPageDragHandlers } from '@/composables/useThumbnails'
 import {
   drawTextOverlays,
+  editAnnotation,
   startTextPlacement,
   placePendingTextAt,
   isEditorActive,
@@ -21,6 +28,12 @@ import {
 import { captureCanvasSelection, gotoBookmark } from '@/composables/useBookmarks'
 import { savePdf } from '@/composables/useSavePdf'
 import { basenameOf } from '@/composables/useOpenPdf'
+import {
+  applyHighlights as applySearchHighlights,
+  closeSearch,
+  openSearch,
+  useTextSearch,
+} from '@/composables/useTextSearch'
 
 const router = useRouter()
 const route = useRoute()
@@ -32,6 +45,11 @@ const canvasStageEl = ref<HTMLDivElement | null>(null)
 const pdfCanvasEl = ref<HTMLCanvasElement | null>(null)
 const textLayerEl = ref<HTMLDivElement | null>(null)
 const textOverlayEl = ref<HTMLDivElement | null>(null)
+// Second-page render targets, used in 2-page (double) view. The right page is
+// canvas-only; no text-layer / no annotation overlay so editing flows still
+// operate on the single "current page" left side.
+const canvasStage2El = ref<HTMLDivElement | null>(null)
+const pdfCanvas2El = ref<HTMLCanvasElement | null>(null)
 const pageListEl = ref<HTMLDivElement | null>(null)
 // TransitionGroup template refs return the component instance, not the DOM node.
 // Bridge through a function ref so highlightActiveSidebarThumb can still query the
@@ -47,6 +65,60 @@ function setPageListEl(el: unknown) {
 const showBookmarkModal = ref(false)
 const editingBookmarkIdx = ref<number | null>(null)
 const editingBookmarkTitle = ref('')
+const search = useTextSearch()
+const activeSidebarTab = ref<'bookmarks' | 'texts'>('bookmarks')
+
+interface TextItem {
+  ann: TextAnnotation
+  isRepeat: boolean
+}
+
+const textsCount = computed(
+  () => pdf.textAnnotations.length + pdf.repeatTexts.length,
+)
+
+const textItems = computed<TextItem[]>(() => {
+  const result: TextItem[] = []
+  for (const ann of pdf.repeatTexts) result.push({ ann, isRepeat: true })
+  for (const ann of pdf.textAnnotations) result.push({ ann, isRepeat: false })
+  result.sort((a, b) => {
+    if (a.isRepeat !== b.isRepeat) return a.isRepeat ? -1 : 1
+    if (a.isRepeat) return 0
+    const pa =
+      a.ann.pageOriginalIdx !== undefined
+        ? pdf.pageOrder.indexOf(a.ann.pageOriginalIdx)
+        : -1
+    const pb =
+      b.ann.pageOriginalIdx !== undefined
+        ? pdf.pageOrder.indexOf(b.ann.pageOriginalIdx)
+        : -1
+    if (pa !== pb) return pa - pb
+    if (a.ann.y !== b.ann.y) return a.ann.y - b.ann.y
+    return a.ann.x - b.ann.x
+  })
+  return result
+})
+
+function textPageLabel(item: TextItem): string {
+  if (item.isRepeat) return '↻'
+  if (item.ann.pageOriginalIdx === undefined) return '—'
+  const ui = pdf.pageOrder.indexOf(item.ann.pageOriginalIdx)
+  return ui >= 0 ? `p.${ui + 1}` : '—'
+}
+
+async function onTextItemClick(item: TextItem) {
+  if (!item.isRepeat && item.ann.pageOriginalIdx !== undefined) {
+    const ui = pdf.pageOrder.indexOf(item.ann.pageOriginalIdx)
+    if (ui < 0) return
+    if (ui !== pdf.currentPage) await gotoPage(ui)
+  }
+  editAnnotation(item.ann, item.isRepeat)
+}
+
+function removeTextItem(item: TextItem) {
+  if (item.isRepeat) pdf.removeRepeatText(item.ann)
+  else pdf.removeTextAnnotation(item.ann)
+}
 
 const filename = computed(() => basenameOf(pdf.filePath))
 
@@ -96,21 +168,51 @@ function onToggleReorder() {
   if (!pdf.gridMode) void renderCurrentPage()
 }
 
+function navStep(): number {
+  return pdf.viewMode === 'double' ? 2 : 1
+}
 function onPrev() {
-  void gotoPage(pdf.currentPage - 1)
+  void gotoPage(Math.max(0, pdf.currentPage - navStep()))
 }
 function onNext() {
-  void gotoPage(pdf.currentPage + 1)
+  void gotoPage(pdf.currentPage + navStep())
+}
+
+function onToggleViewMode() {
+  pdf.toggleViewMode()
+  if (pdf.viewMode === 'double' && pdf.currentPage % 2 === 1) {
+    // Snap to an even left-page so spreads stay aligned across navigation.
+    pdf.setCurrentPage(pdf.currentPage - 1)
+  }
+  pdf.fitMode = true
+  void renderCurrentPage()
+}
+
+function onToggleDoubleGap() {
+  pdf.toggleDoublePageGap()
+  pdf.fitMode = true
+  void renderCurrentPage()
 }
 
 function onKeyDown(e: KeyboardEvent) {
   if (route.name !== 'editor') return
+  // Ctrl/Cmd+F opens find — handled BEFORE the input/textarea early-return so it
+  // works even when focus is in another text input on the page.
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault()
+    openSearch()
+    return
+  }
   const t = e.target as HTMLElement
   if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return
   if (t.isContentEditable) return
   if (e.key === 'ArrowLeft' || e.key === 'PageUp') onPrev()
   else if (e.key === 'ArrowRight' || e.key === 'PageDown') onNext()
   else if (e.key === 'Escape') {
+    if (search.visible.value) {
+      closeSearch()
+      return
+    }
     if (pdf.pendingTextPlacement) {
       pdf.pendingTextPlacement = null
       canvasWrapEl.value?.classList.remove('placing-text')
@@ -122,6 +224,8 @@ function onKeyDown(e: KeyboardEvent) {
 function onPageRendered() {
   drawTextOverlays()
   highlightActiveSidebarThumb()
+  // Text-layer spans were just rebuilt — re-apply any active search highlights.
+  applySearchHighlights()
 }
 
 // pdf.js TextLayerBuilder#bindMouse, distilled. On mousedown inside the layer the
@@ -374,6 +478,8 @@ onMounted(async () => {
   refs.pdfCanvas.value = pdfCanvasEl.value
   refs.textLayer.value = textLayerEl.value
   refs.textOverlay.value = textOverlayEl.value
+  refs.canvasStage2.value = canvasStage2El.value
+  refs.pdfCanvas2.value = pdfCanvas2El.value
 
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('pdf:page-rendered', onPageRendered)
@@ -400,6 +506,8 @@ onBeforeUnmount(() => {
   refs.pdfCanvas.value = null
   refs.textLayer.value = null
   refs.textOverlay.value = null
+  refs.canvasStage2.value = null
+  refs.pdfCanvas2.value = null
 })
 </script>
 
@@ -447,8 +555,13 @@ onBeforeUnmount(() => {
     </aside>
 
     <main class="flex min-h-0 min-w-0 flex-col gap-3">
-      <div class="glass flex items-center gap-3 rounded-[14px] px-3 py-2">
-        <UiButton variant="ghost" size="sm" title="Back to home" @click="router.push({ name: 'welcome' })">
+      <div class="glass flex items-center gap-2 rounded-[14px] px-3 py-2">
+        <UiButton
+          variant="ghost"
+          size="icon"
+          title="Back to home"
+          @click="router.push({ name: 'welcome' })"
+        >
           <svg
             viewBox="0 0 24 24"
             width="14"
@@ -462,15 +575,14 @@ onBeforeUnmount(() => {
             <path d="M19 12H5" />
             <path d="M12 19l-7-7 7-7" />
           </svg>
-          Home
         </UiButton>
-        <span class="flex-1 truncate px-2 text-[13px] text-fg-dim">{{ filename }}</span>
-        <div class="flex gap-2">
+        <span class="min-w-0 flex-1 truncate px-2 text-[13px] text-fg-dim">{{ filename }}</span>
+        <div class="flex flex-shrink-0 gap-1.5">
           <UiButton
             variant="ghost"
-            size="sm"
+            size="icon"
             :toggled="pdf.gridMode"
-            title="Toggle grid reorder view"
+            :title="pdf.gridMode ? 'Done reordering' : 'Reorder pages'"
             @click="onToggleReorder"
           >
             <svg
@@ -488,9 +600,8 @@ onBeforeUnmount(() => {
               <rect x="3" y="14" width="7" height="7" />
               <rect x="14" y="14" width="7" height="7" />
             </svg>
-            <span>{{ pdf.gridMode ? 'Done' : 'Reorder' }}</span>
           </UiButton>
-          <UiButton variant="ghost" size="sm" title="Rotate page left" @click="onRotateLeft">
+          <UiButton variant="ghost" size="icon" title="Rotate page left" @click="onRotateLeft">
             <svg
               viewBox="0 0 24 24"
               width="14"
@@ -505,7 +616,7 @@ onBeforeUnmount(() => {
               <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
             </svg>
           </UiButton>
-          <UiButton variant="ghost" size="sm" title="Rotate page right" @click="onRotateRight">
+          <UiButton variant="ghost" size="icon" title="Rotate page right" @click="onRotateRight">
             <svg
               viewBox="0 0 24 24"
               width="14"
@@ -520,7 +631,7 @@ onBeforeUnmount(() => {
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
           </UiButton>
-          <UiButton variant="ghost" size="sm" title="Add text" @click="onAddText">
+          <UiButton variant="ghost" size="icon" title="Add text" @click="onAddText">
             <svg
               viewBox="0 0 24 24"
               width="14"
@@ -535,9 +646,74 @@ onBeforeUnmount(() => {
               <line x1="9" y1="20" x2="15" y2="20" />
               <line x1="12" y1="4" x2="12" y2="20" />
             </svg>
-            Text
           </UiButton>
-          <UiButton variant="ghost" size="sm" title="Bookmark current page" @click="onAddBookmark">
+          <UiButton
+            variant="ghost"
+            size="icon"
+            :toggled="pdf.viewMode === 'double'"
+            :title="pdf.viewMode === 'double' ? 'Single-page view' : 'Two-page view'"
+            @click="onToggleViewMode"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="3" y="4" width="8" height="16" rx="1" />
+              <rect x="13" y="4" width="8" height="16" rx="1" />
+            </svg>
+          </UiButton>
+          <UiButton
+            v-if="pdf.viewMode === 'double'"
+            variant="ghost"
+            size="icon"
+            :toggled="pdf.doublePageGap"
+            :title="pdf.doublePageGap ? 'Hide gap between pages' : 'Show gap between pages'"
+            @click="onToggleDoubleGap"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="2" y="5" width="8" height="14" rx="1" />
+              <rect x="14" y="5" width="8" height="14" rx="1" />
+              <line x1="12" y1="5" x2="12" y2="19" stroke-dasharray="2 2" />
+            </svg>
+          </UiButton>
+          <UiButton
+            variant="ghost"
+            size="icon"
+            data-search-toggle
+            :toggled="search.visible.value"
+            title="Find in document (Ctrl+F)"
+            @click="search.visible.value ? closeSearch() : openSearch()"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="11" cy="11" r="7" />
+              <line x1="20" y1="20" x2="16.65" y2="16.65" />
+            </svg>
+          </UiButton>
+          <UiButton variant="ghost" size="icon" title="Bookmark current page" @click="onAddBookmark">
             <svg
               viewBox="0 0 24 24"
               width="14"
@@ -550,9 +726,8 @@ onBeforeUnmount(() => {
             >
               <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
             </svg>
-            Bookmark
           </UiButton>
-          <UiButton variant="primary" size="sm" @click="savePdf">
+          <UiButton variant="primary" size="icon" title="Save PDF" @click="savePdf">
             <svg
               viewBox="0 0 24 24"
               width="14"
@@ -567,7 +742,6 @@ onBeforeUnmount(() => {
               <polyline points="17 21 17 13 7 13 7 21" />
               <polyline points="7 3 7 8 15 8" />
             </svg>
-            Save
           </UiButton>
         </div>
       </div>
@@ -581,15 +755,25 @@ onBeforeUnmount(() => {
           class="canvas-wrap"
           :class="[
             { 'grid-mode': pdf.gridMode },
+            { 'view-double': pdf.viewMode === 'double', 'gap-on': pdf.doublePageGap },
             `mode-${pdf.interactionMode}`,
           ]"
           @wheel="zoom.onWheel"
           @mousedown="onMouseDown"
         >
-          <div ref="canvasStageEl" class="canvas-stage">
-            <canvas ref="pdfCanvasEl" />
-            <div ref="textLayerEl" class="text-layer" />
-            <div ref="textOverlayEl" class="text-overlay" />
+          <div class="spread">
+            <div ref="canvasStageEl" class="canvas-stage">
+              <canvas ref="pdfCanvasEl" />
+              <div ref="textLayerEl" class="text-layer" />
+              <div ref="textOverlayEl" class="text-overlay" />
+            </div>
+            <div
+              v-show="pdf.viewMode === 'double'"
+              ref="canvasStage2El"
+              class="canvas-stage canvas-stage-right"
+            >
+              <canvas ref="pdfCanvas2El" />
+            </div>
           </div>
           <TransitionGroup
             v-if="pdf.gridMode"
@@ -615,6 +799,8 @@ onBeforeUnmount(() => {
             />
           </TransitionGroup>
         </div>
+
+        <SearchBar v-if="!pdf.gridMode" />
 
         <div
           v-if="!pdf.gridMode"
@@ -697,16 +883,23 @@ onBeforeUnmount(() => {
           </svg>
         </UiButton>
         <span
-          class="min-w-[64px] text-center text-[13px] text-fg-dim"
+          class="min-w-[72px] text-center text-[13px] text-fg-dim"
           style="font-variant-numeric: tabular-nums"
         >
-          {{ pdf.currentPage + 1 }} / {{ pdf.pageOrder.length }}
+          <template
+            v-if="pdf.viewMode === 'double' && pdf.currentPage + 1 < pdf.pageOrder.length"
+          >
+            {{ pdf.currentPage + 1 }}–{{ pdf.currentPage + 2 }} / {{ pdf.pageOrder.length }}
+          </template>
+          <template v-else>
+            {{ pdf.currentPage + 1 }} / {{ pdf.pageOrder.length }}
+          </template>
         </span>
         <UiButton
           variant="default"
           size="icon"
           title="Next page"
-          :disabled="pdf.currentPage >= pdf.pageOrder.length - 1"
+          :disabled="pdf.currentPage + (pdf.viewMode === 'double' ? 2 : 1) > pdf.pageOrder.length - 1"
           @click="onNext"
         >
           <svg
@@ -760,19 +953,37 @@ onBeforeUnmount(() => {
         title="Drag to resize"
         @mousedown="onSidebarResizeStart"
       />
-      <div
-        class="flex items-center justify-between border-b border-white/[0.06] px-4 py-3.5 text-xs font-semibold uppercase tracking-[0.5px] text-fg-dim"
-      >
-        <span>Bookmarks</span>
-        <span
-          v-if="pdf.bookmarks.length > 1"
-          class="text-[10px] font-normal normal-case tracking-normal text-fg-mute"
-          title="Drag a row right/left or use the indent buttons to change its outline level."
+      <div class="sidebar-tabs">
+        <button
+          type="button"
+          class="sidebar-tab"
+          :class="{ active: activeSidebarTab === 'bookmarks' }"
+          @click="activeSidebarTab = 'bookmarks'"
         >
-          drag to nest
-        </span>
+          <span>Bookmarks</span>
+          <span class="tab-count">{{ pdf.bookmarks.length }}</span>
+        </button>
+        <button
+          type="button"
+          class="sidebar-tab"
+          :class="{ active: activeSidebarTab === 'texts' }"
+          @click="activeSidebarTab = 'texts'"
+        >
+          <span>Texts</span>
+          <span class="tab-count">{{ textsCount }}</span>
+        </button>
       </div>
-      <div class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-2.5">
+      <div
+        v-if="activeSidebarTab === 'bookmarks' && pdf.bookmarks.length > 1"
+        class="px-4 pt-2 text-[10px] text-fg-mute"
+        title="Drag a row right/left or use the indent buttons to change its outline level."
+      >
+        drag to nest
+      </div>
+      <div
+        v-if="activeSidebarTab === 'bookmarks'"
+        class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-2.5"
+      >
         <div
           v-if="pdf.bookmarks.length === 0"
           class="px-4 py-6 text-center text-xs text-fg-mute"
@@ -902,6 +1113,43 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+
+      <div
+        v-if="activeSidebarTab === 'texts'"
+        class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-2.5"
+      >
+        <div
+          v-if="textItems.length === 0"
+          class="px-4 py-6 text-center text-xs text-fg-mute"
+        >
+          No inserted text yet.<br />
+          Click the “Text” icon in the toolbar to add some.
+        </div>
+        <div
+          v-for="(item, i) in textItems"
+          :key="`txt-${i}`"
+          class="text-item"
+          @click="onTextItemClick(item)"
+        >
+          <span
+            class="txt-badge"
+            :class="{ repeat: item.isRepeat }"
+            :title="item.isRepeat ? 'Repeats on every page' : 'Page'"
+          >
+            {{ textPageLabel(item) }}
+          </span>
+          <span class="txt-preview">{{ item.ann.text || '(empty)' }}</span>
+          <button
+            type="button"
+            class="txt-del"
+            title="Remove"
+            @click.stop="removeTextItem(item)"
+            @mousedown.stop
+          >
+            ×
+          </button>
+        </div>
+      </div>
     </aside>
 
     <!-- Overlays live inside the single root <section> (so the route transition has
@@ -972,6 +1220,134 @@ onBeforeUnmount(() => {
   background: var(--color-accent);
 }
 
+/* Tab strip in the right sidebar. Two pill buttons sit side-by-side; the
+ * active tab gets the accent gradient. Counts hang on the right of each label
+ * so the user can see how many bookmarks/texts the document has at a glance. */
+.sidebar-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 8px 0 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.sidebar-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--color-fg-mute);
+  border-radius: 8px 8px 0 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color 0.15s var(--ease-out-soft), background 0.15s var(--ease-out-soft),
+    border-color 0.15s var(--ease-out-soft);
+}
+.sidebar-tab:hover {
+  color: var(--color-fg-dim);
+  background: rgba(255, 255, 255, 0.04);
+}
+.sidebar-tab.active {
+  color: var(--color-fg);
+  border-bottom-color: var(--color-accent);
+}
+.tab-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-fg-dim);
+}
+.sidebar-tab.active .tab-count {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+  color: #fff;
+}
+
+/* Texts list (right sidebar, "Texts" tab). Mirrors the bookmark row layout
+ * but simpler — no hierarchy, no drag-to-nest. Click navigates to the page
+ * containing the annotation and opens the inline editor for it. */
+.text-item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 8px 8px 10px;
+  border-radius: 8px;
+  background: var(--color-glass);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-out-soft), border-color 0.15s var(--ease-out-soft);
+}
+.text-item:hover {
+  background: var(--color-glass-strong);
+  border-color: var(--color-glass-border);
+}
+.txt-badge {
+  flex-shrink: 0;
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-fg-dim);
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
+.txt-badge.repeat {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+  color: #fff;
+  font-size: 12px;
+}
+.txt-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-fg);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.txt-del {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  flex-shrink: 0;
+  color: var(--color-fg-dim);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease-out-soft), background 0.15s var(--ease-out-soft),
+    color 0.15s var(--ease-out-soft);
+}
+.text-item:hover .txt-del {
+  opacity: 1;
+}
+.txt-del:hover {
+  background: #e81123;
+  color: #fff;
+}
+
 /* Canvas-wrap — precise positioning is required, scoped block holds the legacy CSS verbatim. */
 .canvas-wrap {
   flex: 1 1 0;
@@ -1029,6 +1405,19 @@ onBeforeUnmount(() => {
   background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
   color: #fff;
 }
+/* Spread = the wrapper that holds the left page (and the right page in
+ * 2-page view). In single mode it contains one stage and behaves the same as
+ * before; in double mode it lays out the two stages side by side and the
+ * gap-on modifier inserts a visible gap between them. */
+.spread {
+  display: flex;
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+.canvas-wrap.view-double.gap-on .spread {
+  gap: 16px;
+}
+
 .canvas-stage {
   position: relative;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
@@ -1050,7 +1439,8 @@ onBeforeUnmount(() => {
   padding: 24px;
   align-items: flex-start;
 }
-.canvas-wrap.grid-mode .canvas-stage {
+.canvas-wrap.grid-mode .canvas-stage,
+.canvas-wrap.grid-mode .spread {
   display: none;
 }
 .grid-view {
@@ -1312,6 +1702,19 @@ body.resizing-sidebar * {
 .text-layer ::-moz-selection {
   background: rgba(167, 139, 250, 0.55);
   color: transparent;
+}
+
+/* Search highlights — applied as classes on the existing text-layer spans by
+ * useTextSearch.applyHighlights(). The "current" match gets a stronger color so
+ * it's visible while you cycle through results with Enter / Shift+Enter. */
+.text-layer span.search-hit {
+  background-color: rgba(255, 213, 79, 0.45);
+  border-radius: 1px;
+}
+.text-layer span.search-current {
+  background-color: rgba(255, 145, 0, 0.78);
+  border-radius: 1px;
+  box-shadow: 0 0 0 1px rgba(255, 145, 0, 0.95);
 }
 
 /* Placed-text overlay (user-added annotations) */

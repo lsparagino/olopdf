@@ -67,7 +67,7 @@ function onKeydown(e: KeyboardEvent) {
       @click="onBackgroundClick"
     >
       <div
-        class="glass flex w-[min(420px,90%)] flex-col gap-4 rounded-[18px] p-7"
+        class="modal-card flex w-[min(420px,90%)] flex-col gap-4 rounded-[18px] p-7"
         @click.stop
       >
         <h3 class="text-base font-semibold text-fg">Add Bookmark</h3>
@@ -100,20 +100,31 @@ function onKeydown(e: KeyboardEvent) {
 </template>
 
 <style scoped>
+/* Solid-dark surface — matches the SearchBar / SelectionToolbar / inline-text
+ * toolbar pattern. The translucent glass utility had poor contrast over busy
+ * page content. */
+.modal-card {
+  background: rgba(20, 20, 32, 0.96);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--color-glass-border);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
+}
+
 .modal-enter-active,
 .modal-leave-active {
   transition: opacity 0.2s var(--ease-out-soft);
 }
-.modal-enter-active .glass,
-.modal-leave-active .glass {
+.modal-enter-active .modal-card,
+.modal-leave-active .modal-card {
   transition: transform 0.25s var(--ease-out-soft);
 }
 .modal-enter-from,
 .modal-leave-to {
   opacity: 0;
 }
-.modal-enter-from .glass,
-.modal-leave-to .glass {
+.modal-enter-from .modal-card,
+.modal-leave-to .modal-card {
   transform: scale(0.95) translateY(8px);
 }
 </style>

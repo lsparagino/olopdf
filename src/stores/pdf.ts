@@ -77,6 +77,7 @@ interface PdfjsDocLike {
 }
 
 export type InteractionMode = 'select' | 'pan'
+export type ViewMode = 'single' | 'double'
 
 export interface PdfStoreState {
   filePath: string | null
@@ -97,6 +98,12 @@ export interface PdfStoreState {
   capturedSelection: CapturedSelection | null
   gridMode: boolean
   interactionMode: InteractionMode
+  // Side-by-side two-page display. The right page is render-only (no
+  // overlays / no edit affordances) so editing flows still operate on the
+  // single "current page" left side. doublePageGap toggles a visible gap
+  // between the two pages.
+  viewMode: ViewMode
+  doublePageGap: boolean
   mergeFiles: MergeFile[]
   compare: CompareState
 }
@@ -155,6 +162,8 @@ export const usePdfStore = defineStore('pdf', {
     capturedSelection: null,
     gridMode: false,
     interactionMode: 'select',
+    viewMode: 'single',
+    doublePageGap: true,
     mergeFiles: [],
     compare: initialCompareState(),
   }),
@@ -274,6 +283,16 @@ export const usePdfStore = defineStore('pdf', {
 
     setInteractionMode(mode: InteractionMode) {
       this.interactionMode = mode
+    },
+
+    setViewMode(mode: ViewMode) {
+      this.viewMode = mode
+    },
+    toggleViewMode() {
+      this.viewMode = this.viewMode === 'double' ? 'single' : 'double'
+    },
+    toggleDoublePageGap() {
+      this.doublePageGap = !this.doublePageGap
     },
 
     addBookmark(b: Bookmark) {

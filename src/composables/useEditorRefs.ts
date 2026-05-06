@@ -13,6 +13,11 @@ interface EditorRefs {
   pdfCanvas: Ref<HTMLCanvasElement | null>
   textLayer: Ref<HTMLDivElement | null>
   textOverlay: Ref<HTMLDivElement | null>
+  // Right-page render targets used in 2-page (double) view. The right page is
+  // canvas-only — no text layer, no annotation overlay — so editing flows
+  // continue to operate on the single "current page" on the left.
+  canvasStage2: Ref<HTMLDivElement | null>
+  pdfCanvas2: Ref<HTMLCanvasElement | null>
   filename: Ref<string>
   zoomLabel: Ref<string>
 }
@@ -23,6 +28,8 @@ const refs: EditorRefs = {
   pdfCanvas: ref(null),
   textLayer: ref(null),
   textOverlay: ref(null),
+  canvasStage2: ref(null),
+  pdfCanvas2: ref(null),
   filename: ref(''),
   zoomLabel: ref('100%'),
 }

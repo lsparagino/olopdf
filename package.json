@@ -61,6 +61,8 @@
     "buildDependenciesFromSource": false,
     "files": [
       "main.js",
+      "build/icon.ico",
+      "build/icon.png",
       "dist-renderer/**/*",
       "node_modules/**/*",
       "!node_modules/canvas/**/*",

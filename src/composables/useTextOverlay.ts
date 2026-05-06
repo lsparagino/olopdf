@@ -44,8 +44,33 @@ interface ActiveEditor {
 
 let activeEditor: ActiveEditor | null = null
 
+// Per-element back-reference to the annotation it renders. Lets external callers
+// (the Inserted Text panel) find the placed-text DOM node for a given annotation
+// without us having to assign and track DOM ids.
+const PLACED_TEXT_ANN = new WeakMap<HTMLDivElement, TextAnnotation>()
+
 export function isEditorActive(): boolean {
   return !!activeEditor
+}
+
+// Open the inline editor for an annotation that already lives in the store. The
+// caller is responsible for navigating to the correct page first; we look up the
+// rendered placed-text element on the current overlay (so it can be hidden while
+// the editor is active) and invoke openEditor with the right isRepeat flag.
+export function editAnnotation(ann: TextAnnotation, isRepeat: boolean): void {
+  const refs = useEditorRefs()
+  const overlay = refs.textOverlay.value
+  let sourceEl: HTMLElement | null = null
+  if (overlay) {
+    const placed = overlay.querySelectorAll<HTMLDivElement>('.placed-text')
+    for (const el of placed) {
+      if (PLACED_TEXT_ANN.get(el) === ann) {
+        sourceEl = el
+        break
+      }
+    }
+  }
+  openEditor({ ann, isRepeat, isNew: false, sourceEl })
 }
 
 export function drawTextOverlays(): void {
@@ -83,6 +108,7 @@ function makePlacedTextEl(ann: TextAnnotation, isRepeat: boolean): HTMLDivElemen
   const el = document.createElement('div')
   el.className = `placed-text${isRepeat ? ' repeat' : ''}`
   el.textContent = ann.text
+  PLACED_TEXT_ANN.set(el, ann)
   positionPlacedText(el, ann)
 
   if (isRepeat) {
@@ -183,7 +209,16 @@ function onTextMouseDown(e: MouseEvent, el: HTMLDivElement, ann: TextAnnotation)
     document.removeEventListener('mouseup', onUp)
     el.classList.remove('dragging')
     document.body.classList.remove('text-dragging')
-    if (moved) toast('Text moved')
+    if (moved) {
+      toast('Text moved')
+      return
+    }
+    // Click without drag: enter edit mode. The annotation lives in either
+    // textAnnotations or repeatTexts — repeatTexts has no pageOriginalIdx, so
+    // checking presence in the per-page array is the reliable discriminator.
+    const store = usePdfStore()
+    const isRepeat = store.repeatTexts.indexOf(ann) >= 0
+    openEditor({ ann, isRepeat, isNew: false, sourceEl: el })
   }
   document.addEventListener('mousemove', onMove)
   document.addEventListener('mouseup', onUp)

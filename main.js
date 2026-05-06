@@ -35,6 +35,16 @@ app.on('child-process-gone', (_e, details) => log('child-process-gone', details)
 
 let mainWindow;
 
+// Resolved at startup so it's available everywhere we create a window or set the
+// app icon. Without this, Windows falls back to the host exe's embedded icon —
+// which is the Electron logo in dev, and a stale-cached version of the OloPDF
+// icon in some packaged builds.
+const APP_ICON = path.join(__dirname, 'build', 'icon.ico');
+
+// Pin the user-model id so Windows attributes the taskbar group and pinned
+// shortcut to OloPDF instead of "electron.app.<random>".
+app.setAppUserModelId('com.olopad.olopdf');
+
 function createWindow() {
   log('createWindow');
   mainWindow = new BrowserWindow({
@@ -46,6 +56,7 @@ function createWindow() {
     backgroundColor: '#0a0a14',
     show: false,
     autoHideMenuBar: true,
+    icon: APP_ICON,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,

@@ -1,6 +1,6 @@
 {
   "name": "olopdf",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "OloPDF — modern, portable PDF editor powered by Olopad",
   "main": "main.js",
   "author": {

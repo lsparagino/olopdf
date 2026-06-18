@@ -45,6 +45,10 @@ function onMerge() {
 function onCompare() {
   void router.push({ name: 'compare' })
 }
+
+function onCompress() {
+  void router.push({ name: 'compress' })
+}
 </script>
 
 <route lang="json">
@@ -104,8 +108,8 @@ function onCompare() {
         <p class="mb-6 text-fg-dim">Modern, portable, beautiful</p>
         <p class="mb-7 text-[13px] text-fg-mute">Drop a PDF anywhere or pick an action below</p>
 
-        <div class="flex flex-wrap justify-center gap-3">
-          <UiButton variant="primary" @click="pickAndOpenPdf">
+        <div class="flex flex-col gap-3">
+          <UiButton variant="primary" class="w-full" @click="pickAndOpenPdf">
             <svg
               viewBox="0 0 24 24"
               width="16"
@@ -122,42 +126,62 @@ function onCompare() {
             </svg>
             Open PDF
           </UiButton>
-          <UiButton @click="onMerge">
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M8 3v3a2 2 0 0 1-2 2H3" />
-              <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
-              <path d="M3 16h3a2 2 0 0 1 2 2v3" />
-              <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
-            </svg>
-            Merge PDFs
-          </UiButton>
-          <UiButton @click="onCompare">
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <polyline points="17 1 21 5 17 9" />
-              <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-              <polyline points="7 23 3 19 7 15" />
-              <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-            </svg>
-            Compare PDFs
-          </UiButton>
+          <div class="grid grid-cols-3 gap-3">
+            <UiButton class="w-full" @click="onMerge">
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+              </svg>
+              Merge
+            </UiButton>
+            <UiButton class="w-full" @click="onCompare">
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <polyline points="17 1 21 5 17 9" />
+                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                <polyline points="7 23 3 19 7 15" />
+                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+              </svg>
+              Compare
+            </UiButton>
+            <UiButton class="w-full" @click="onCompress">
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <polyline points="4 14 10 14 10 20" />
+                <polyline points="20 10 14 10 14 4" />
+                <line x1="14" y1="10" x2="21" y2="3" />
+                <line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+              Compress
+            </UiButton>
+          </div>
         </div>
       </div>
 

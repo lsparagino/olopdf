@@ -228,34 +228,39 @@ function onPageRendered() {
   applySearchHighlights()
 }
 
-// pdf.js TextLayerBuilder#bindMouse, distilled. On mousedown inside the layer the
-// `endOfContent` sentinel is moved so its top edge sits at the click's Y position
-// (as a percentage of the layer height). The sentinel covers everything below the
-// click and has user-select: none, so once the cursor strays past the bottom of
-// the spans the browser can't extend the selection there — it freezes at the last
+// pdf.js TextLayerBuilder#bindMouse, distilled. On mousedown the `endOfContent`
+// sentinel is moved so its top edge sits at the press's Y position (as a
+// percentage of the layer height). The sentinel covers everything below the press
+// and has user-select: none, so once the cursor strays past the bottom of the
+// spans the browser can't extend the selection there — it freezes at the last
 // valid span. On mouseup we revert. Without this trick, dragging past the text
 // snaps the selection to the topmost or bottommost span on the page.
-function onTextLayerMouseDown(e: MouseEvent) {
-  if (e.button !== 0) return
+//
+// Two deliberate departures from pdf.js: the press is caught on the canvas-wrap
+// rather than the layer, so a drag starting in the grey margin beside the page is
+// fenced too, and the release is caught on the document, because a text drag very
+// often ends outside the layer — pdf.js's layer-bound mouseup then never fires and
+// the sentinel stays active with a stale top, poisoning the *next* selection.
+function onSelectionFenceDown(e: MouseEvent) {
+  if (e.button !== 0 || pdf.gridMode) return
   const layer = textLayerEl.value
   if (!layer) return
   const end = layer.querySelector<HTMLDivElement>('.end-of-content')
   if (!end) return
-  // adjustTop is only meaningful when the click landed on a text run (not the
-  // empty layer); in Firefox the -moz-user-select check skips the dynamic
-  // positioning since user-select: none on the sentinel is enough there.
-  let adjustTop = e.target !== layer
-  adjustTop &&=
-    getComputedStyle(end).getPropertyValue('-moz-user-select') !== 'none'
-  if (adjustTop) {
-    const layerRect = layer.getBoundingClientRect()
-    const r = Math.max(0, (e.pageY - layerRect.top) / layerRect.height)
+  const rect = layer.getBoundingClientRect()
+  // Anchor the fence at the cursor only when the press landed on a text run. A
+  // press on bare layer (the gaps between runs) or outside it altogether has no
+  // trustworthy anchor, so it falls back to `.active`'s top: 0 and fences the
+  // whole layer — the spans paint above the sentinel, so they stay selectable
+  // either way; only the empty space between them stops attracting the selection.
+  if (e.target !== layer && layer.contains(e.target as Node) && rect.height > 0) {
+    const r = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
     end.style.top = `${(r * 100).toFixed(2)}%`
   }
   end.classList.add('active')
 }
 
-function onTextLayerMouseUp() {
+function onSelectionFenceUp() {
   const layer = textLayerEl.value
   if (!layer) return
   const end = layer.querySelector<HTMLDivElement>('.end-of-content')
@@ -483,8 +488,8 @@ onMounted(async () => {
 
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('pdf:page-rendered', onPageRendered)
-  textLayerEl.value?.addEventListener('mousedown', onTextLayerMouseDown)
-  textLayerEl.value?.addEventListener('mouseup', onTextLayerMouseUp)
+  canvasWrapEl.value?.addEventListener('mousedown', onSelectionFenceDown)
+  document.addEventListener('mouseup', onSelectionFenceUp)
 
   // If the user landed on /editor without a loaded doc, bounce back to welcome.
   if (!pdf.pdfjsDoc) {
@@ -498,8 +503,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('pdf:page-rendered', onPageRendered)
-  textLayerEl.value?.removeEventListener('mousedown', onTextLayerMouseDown)
-  textLayerEl.value?.removeEventListener('mouseup', onTextLayerMouseUp)
+  canvasWrapEl.value?.removeEventListener('mousedown', onSelectionFenceDown)
+  document.removeEventListener('mouseup', onSelectionFenceUp)
   // Clear refs so other screens don't accidentally read stale DOM.
   refs.canvasWrap.value = null
   refs.canvasStage.value = null
@@ -1652,7 +1657,12 @@ body.resizing-sidebar * {
   user-select: text !important;
   -webkit-user-select: text !important;
 }
-.text-layer span {
+/* The <br> siblings mark visual line ends so a multi-line selection copies out
+ * with its line breaks intact. They're absolutely positioned for the same reason
+ * pdf.js does it: out of flow they can't push the spans around, and Chromium
+ * still serialises them as newlines. */
+.text-layer span,
+.text-layer br {
   color: transparent;
   position: absolute;
   white-space: pre;
@@ -1688,7 +1698,8 @@ body.resizing-sidebar * {
 }
 
 .canvas-wrap.mode-pan .text-layer,
-.canvas-wrap.mode-pan .text-layer span {
+.canvas-wrap.mode-pan .text-layer span,
+.canvas-wrap.mode-pan .text-layer br {
   pointer-events: none;
   cursor: grab;
   user-select: none !important;

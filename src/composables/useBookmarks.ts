@@ -12,7 +12,9 @@ export function captureCanvasSelection(): CapturedSelection | null {
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null
   const range = sel.getRangeAt(0)
   if (!stage.contains(range.startContainer)) return null
-  const text = sel.toString().trim()
+  // A selection spanning several lines carries the text layer's line breaks; a
+  // bookmark title is a single-line field, so fold them into spaces.
+  const text = sel.toString().replace(/\s+/g, ' ').trim()
   if (!text) return null
   const rect = range.getBoundingClientRect()
   const cr = canvas.getBoundingClientRect()

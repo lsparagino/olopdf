@@ -78,6 +78,10 @@ interface PdfjsDocLike {
 
 export type InteractionMode = 'select' | 'pan'
 export type ViewMode = 'single' | 'double'
+// 'width' fits the widest page across the container, 'page' fits a whole page
+// (or spread) into the viewport, 'none' means the user pinned an explicit zoom.
+// The two fit modes stay active so a window/sidebar resize re-fits.
+export type FitMode = 'width' | 'page' | 'none'
 
 export interface PdfStoreState {
   filePath: string | null
@@ -90,10 +94,8 @@ export interface PdfStoreState {
   repeatTexts: TextAnnotation[]
   currentPage: number
   zoom: number
-  fitMode: boolean
+  fitMode: FitMode
   thumbCache: Map<number, string>
-  baseViewport: { width: number; height: number } | null
-  renderedZoom: number | null
   pendingTextPlacement: PendingTextPlacement | null
   capturedSelection: CapturedSelection | null
   gridMode: boolean
@@ -118,6 +120,11 @@ export const PDF_CONFIG = Object.freeze({
   ZOOM_MIN: 0.2,
   ZOOM_MAX: 5,
   CANVAS_PADDING: 48,
+  // Vertical gap between stacked pages in the continuous flow, and the number of
+  // rows painted beyond the viewport on each side so a fast scroll lands on
+  // already-rendered pages instead of blanks.
+  PAGE_GAP_PX: 16,
+  RENDER_OVERSCAN_ROWS: 2,
   TEXT_DRAG_THRESHOLD_PX: 2,
   TOAST_DURATION_MS: 2400,
   COMPARE_VISUAL_RENDER_SCALE: 1.5,
@@ -154,10 +161,8 @@ export const usePdfStore = defineStore('pdf', {
     repeatTexts: [],
     currentPage: 0,
     zoom: 1.0,
-    fitMode: true,
+    fitMode: 'width',
     thumbCache: new Map(),
-    baseViewport: null,
-    renderedZoom: null,
     pendingTextPlacement: null,
     capturedSelection: null,
     gridMode: false,
@@ -195,11 +200,9 @@ export const usePdfStore = defineStore('pdf', {
       this.repeatTexts = []
       this.currentPage = 0
       this.zoom = 1.0
-      this.fitMode = true
+      this.fitMode = 'width'
       this.thumbCache = markRaw(new Map())
       this.gridMode = false
-      this.baseViewport = null
-      this.renderedZoom = null
       this.pendingTextPlacement = null
       this.capturedSelection = null
     },
@@ -208,18 +211,21 @@ export const usePdfStore = defineStore('pdf', {
       this.zoom = clamp(z, PDF_CONFIG.ZOOM_MIN, PDF_CONFIG.ZOOM_MAX)
     },
     zoomIn() {
-      this.fitMode = false
+      this.fitMode = 'none'
       this.setZoom(this.zoom + PDF_CONFIG.ZOOM_STEP)
     },
     zoomOut() {
-      this.fitMode = false
+      this.fitMode = 'none'
       this.setZoom(this.zoom - PDF_CONFIG.ZOOM_STEP)
     },
-    zoomFit() {
-      this.fitMode = true
+    zoomFitPage() {
+      this.fitMode = 'page'
+    },
+    zoomFitWidth() {
+      this.fitMode = 'width'
     },
     wheelZoom(direction: 1 | -1) {
-      this.fitMode = false
+      this.fitMode = 'none'
       this.setZoom(this.zoom + direction * PDF_CONFIG.WHEEL_ZOOM_STEP)
     },
 

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 // Floating toolbar that appears above a text selection in the canvas. Buttons: copy, bookmark.
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { useEditorRefs } from '@/composables/useEditorRefs'
 import { toast } from '@/composables/useToast'
 
 const emit = defineEmits<{ bookmark: [] }>()
@@ -13,13 +12,16 @@ const lastText = ref('')
 const tbEl = ref<HTMLDivElement | null>(null)
 
 function getCanvasSelection(): { range: Range; text: string } | null {
-  const refs = useEditorRefs()
-  const layer = refs.textLayer.value
-  if (!layer) return null
   const sel = window.getSelection()
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null
   const range = sel.getRangeAt(0)
-  if (!layer.contains(range.startContainer)) return null
+  // Any page's text layer will do — with the continuous flow there is one per
+  // page, and a selection may even span two of them.
+  const start =
+    range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? (range.startContainer as Element)
+      : range.startContainer.parentElement
+  if (!start?.closest('.text-layer')) return null
   const text = sel.toString().trim()
   if (!text) return null
   return { range, text }
@@ -65,13 +67,22 @@ function onMouseUp() {
   setTimeout(showAtSelection, 0)
 }
 
+// Scrolling is the primary interaction in the continuous viewer, so the toolbar
+// follows the selection instead of hiding: it is position:fixed and placed from a
+// live range rect, so re-running showAtSelection is all it takes. Throttled to
+// one run per frame.
+let raf: number | null = null
+function onScroll() {
+  if (!visible.value || raf !== null) return
+  raf = requestAnimationFrame(() => {
+    raf = null
+    showAtSelection()
+  })
+}
+
 function onSelectionChange() {
   const sel = window.getSelection()
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) hide()
-}
-
-function onPageRendered() {
-  hide()
 }
 
 async function copyText() {
@@ -94,17 +105,16 @@ function bookmark() {
 onMounted(() => {
   document.addEventListener('mouseup', onMouseUp)
   document.addEventListener('selectionchange', onSelectionChange)
-  window.addEventListener('pdf:page-rendered', onPageRendered)
-  const refs = useEditorRefs()
-  refs.canvasWrap.value?.addEventListener('scroll', hide)
+  // Scroll doesn't bubble, so listen in the capture phase on the document —
+  // whichever container scrolled, the toolbar has to track it.
+  document.addEventListener('scroll', onScroll, true)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('mouseup', onMouseUp)
   document.removeEventListener('selectionchange', onSelectionChange)
-  window.removeEventListener('pdf:page-rendered', onPageRendered)
-  const refs = useEditorRefs()
-  refs.canvasWrap.value?.removeEventListener('scroll', hide)
+  document.removeEventListener('scroll', onScroll, true)
+  if (raf !== null) cancelAnimationFrame(raf)
 })
 </script>
 

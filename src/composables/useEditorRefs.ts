@@ -6,30 +6,21 @@ import { ref, type Ref } from 'vue'
 // Why a module-level singleton: the composables don't all run inside the same setup() — some
 // fire from custom-event listeners or store watchers. Passing refs through props/provide
 // would require threading them through every layer. Centralizing here keeps the wiring trivial.
+//
+// Only the scroll container lives here. The per-page canvas / text layer / overlay used to as
+// well, back when exactly one page was on screen; the continuous viewer mounts every page at
+// once, so those are resolved from the rendered DOM instead — see usePageElements.ts.
 
 interface EditorRefs {
   canvasWrap: Ref<HTMLDivElement | null>
-  canvasStage: Ref<HTMLDivElement | null>
-  pdfCanvas: Ref<HTMLCanvasElement | null>
-  textLayer: Ref<HTMLDivElement | null>
-  textOverlay: Ref<HTMLDivElement | null>
-  // Right-page render targets used in 2-page (double) view. The right page is
-  // canvas-only — no text layer, no annotation overlay — so editing flows
-  // continue to operate on the single "current page" on the left.
-  canvasStage2: Ref<HTMLDivElement | null>
-  pdfCanvas2: Ref<HTMLCanvasElement | null>
+  pageFlow: Ref<HTMLDivElement | null>
   filename: Ref<string>
   zoomLabel: Ref<string>
 }
 
 const refs: EditorRefs = {
   canvasWrap: ref(null),
-  canvasStage: ref(null),
-  pdfCanvas: ref(null),
-  textLayer: ref(null),
-  textOverlay: ref(null),
-  canvasStage2: ref(null),
-  pdfCanvas2: ref(null),
+  pageFlow: ref(null),
   filename: ref(''),
   zoomLabel: ref('100%'),
 }

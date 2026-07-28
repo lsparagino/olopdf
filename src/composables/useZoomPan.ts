@@ -1,194 +1,165 @@
-import { onBeforeUnmount, onMounted } from 'vue'
-import { PDF_CONFIG, usePdfStore } from '@/stores/pdf'
+import { nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
+import { usePdfStore } from '@/stores/pdf'
 import { useEditorRefs } from '@/composables/useEditorRefs'
-import { renderCurrentPage } from '@/composables/usePdfRenderer'
-import { gotoPage } from '@/composables/usePageActions'
+import {
+  captureScrollAnchor,
+  fitScale,
+  restoreScrollAnchor,
+  scrollToPage,
+  setContainerSize,
+  setFitAnchor,
+} from '@/composables/useViewerScroll'
 
-const FLIP_THRESHOLD = 30
-const OVERFLOW_TOLERANCE = 2
-
-function normalizeWheelDelta(e: WheelEvent): number {
-  if (e.deltaMode === 1) return e.deltaY * 16
-  if (e.deltaMode === 2) return e.deltaY * 600
-  return e.deltaY
-}
-
-// Wheel-zoom: CSS-resize on each tick (keeps the previously rendered bitmap visible —
-// momentarily blurry, but no flicker), then debounce-render the crisp bitmap.
-function applyCssZoom(): void {
+// Zoom and pan for the continuous viewer.
+//
+// The wheel is deliberately NOT handled here any more: the pages are stacked in a
+// real scroll container, so plain wheel scrolling is the browser's job and stays
+// smooth. Only Ctrl+wheel and Ctrl+±/0 reach us, routed through the capture-phase
+// listeners in useChromeZoomDefense as 'pdf:wheel-zoom' / 'pdf:zoom-key'.
+export function useZoomPan() {
   const pdf = usePdfStore()
   const refs = useEditorRefs()
-  const stage = refs.canvasStage.value
-  const canvas = refs.pdfCanvas.value
-  const overlay = refs.textOverlay.value
-  const layer = refs.textLayer.value
-  if (!pdf.baseViewport || !stage || !canvas) return
-  const w = pdf.baseViewport.width * pdf.zoom
-  const h = pdf.baseViewport.height * pdf.zoom
-  stage.style.width = `${w}px`
-  stage.style.height = `${h}px`
-  canvas.style.width = `${w}px`
-  canvas.style.height = `${h}px`
-  if (overlay) {
-    overlay.style.width = `${w}px`
-    overlay.style.height = `${h}px`
-  }
-  // The text-layer spans have absolute positions baked in at the rendered zoom; hide
-  // the layer until the debounced render rebuilds the spans at the new zoom.
-  if (layer) layer.style.visibility = 'hidden'
-  refs.zoomLabel.value = `${Math.round(pdf.zoom * 100)}%`
-  // Placed-text overlay reads pdf.zoom directly, so it'll move on the next reactive tick.
-}
-
-export function useZoomPan(canvasWrapEl: () => HTMLElement | null) {
-  const pdf = usePdfStore()
-  const refs = useEditorRefs()
-  let zoomDebounceTimer: ReturnType<typeof setTimeout> | null = null
-  let wheelAcc = 0
-  let wheelDir = 0
-  let isFlipping = false
+  let resizeObserver: ResizeObserver | null = null
   let cleanups: Array<() => void> = []
+
+  // Every zoom change is bracketed by an anchor capture/restore so the point the
+  // user was looking at stays under the cursor instead of the flow collapsing
+  // back to wherever scrollTop happens to land after the reflow.
+  async function withZoomAnchor(mutate: () => void): Promise<void> {
+    const anchor = captureScrollAnchor()
+    mutate()
+    await nextTick()
+    restoreScrollAnchor(anchor)
+  }
 
   function onWheelZoomEvent(e: Event) {
     const detail = (e as CustomEvent<{ direction: 1 | -1 }>).detail
-    pdf.wheelZoom(detail.direction)
-    applyCssZoom()
-    if (zoomDebounceTimer) clearTimeout(zoomDebounceTimer)
-    zoomDebounceTimer = setTimeout(async () => {
-      zoomDebounceTimer = null
-      await renderCurrentPage()
-      const layer = refs.textLayer.value
-      if (layer) layer.style.visibility = ''
-    }, 120)
+    void withZoomAnchor(() => pdf.wheelZoom(detail.direction))
   }
 
   function onZoomKey(e: Event) {
     const detail = (e as CustomEvent<'in' | 'out' | 'fit'>).detail
-    if (detail === 'in') pdf.zoomIn()
-    else if (detail === 'out') pdf.zoomOut()
-    else pdf.zoomFit()
-    void renderCurrentPage()
-  }
-
-  function onWheel(e: WheelEvent) {
-    if (e.ctrlKey || e.metaKey) return // chrome defense intercepts these
-    if (pdf.gridMode) return
-    const wrap = e.currentTarget as HTMLElement
-    const deltaY = normalizeWheelDelta(e)
-    const dir = Math.sign(deltaY)
-    if (!dir) return
-
-    const overflow = wrap.scrollHeight - wrap.clientHeight
-    const canScroll = overflow > OVERFLOW_TOLERANCE
-    const atTop = wrap.scrollTop <= 0
-    const atBottom =
-      wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - OVERFLOW_TOLERANCE
-    const atEdge = (dir > 0 && atBottom) || (dir < 0 && atTop)
-
-    if (canScroll && !atEdge) {
-      wheelAcc = 0
-      return
-    }
-
-    e.preventDefault()
-    if (isFlipping) return
-    if (wheelDir !== dir) {
-      wheelDir = dir
-      wheelAcc = 0
-    }
-    wheelAcc += Math.abs(deltaY)
-    if (wheelAcc < FLIP_THRESHOLD) return
-    wheelAcc = 0
-
-    const target = pdf.currentPage + dir
-    if (target < 0 || target >= pdf.pageOrder.length) return
-    isFlipping = true
-    gotoPage(target)
-      .then(() => {
-        const w = canvasWrapEl()
-        if (!w) {
-          isFlipping = false
-          return
-        }
-        if (dir < 0) w.scrollTop = Math.max(0, w.scrollHeight - w.clientHeight)
-        else w.scrollTop = 0
-        isFlipping = false
-      })
-      .catch(() => {
-        isFlipping = false
-      })
+    if (detail === 'in') void withZoomAnchor(() => pdf.zoomIn())
+    else if (detail === 'out') void withZoomAnchor(() => pdf.zoomOut())
+    else onZoomFitPageClick()
   }
 
   function startPan(e: MouseEvent) {
-    const wrap = canvasWrapEl()
-    const stage = refs.canvasStage.value
-    if (!wrap || !stage) return
-    const canPanX = wrap.scrollWidth > wrap.clientWidth
-    const canPanY = wrap.scrollHeight > wrap.clientHeight
-    if (!canPanX && !canPanY) return
-
+    const wrap = refs.canvasWrap.value
+    if (!wrap) return
+    // No can-pan snapshot: the scroll setters clamp themselves, and in a
+    // continuous document a downward pan can enter a wider page mid-drag.
     e.preventDefault()
-    stage.classList.add('panning')
+    wrap.classList.add('panning')
     let lastX = e.clientX
     let lastY = e.clientY
     function onMove(ev: MouseEvent) {
-      if (canPanX) wrap!.scrollLeft -= ev.clientX - lastX
-      if (canPanY) wrap!.scrollTop -= ev.clientY - lastY
+      wrap!.scrollLeft -= ev.clientX - lastX
+      wrap!.scrollTop -= ev.clientY - lastY
       lastX = ev.clientX
       lastY = ev.clientY
     }
     function onUp() {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
-      stage!.classList.remove('panning')
+      // A mouseup outside the Electron window is never delivered; without the
+      // blur fallback the viewer stays stuck in .panning with a grabbing cursor.
+      window.removeEventListener('blur', onUp)
+      wrap!.classList.remove('panning')
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
+    window.addEventListener('blur', onUp)
   }
 
-  // Resize re-fit (only while in fit-mode and not in grid-mode)
-  let resizeRaf: number | null = null
-  function onResize() {
-    if (pdf.gridMode || !pdf.fitMode) return
-    if (resizeRaf) cancelAnimationFrame(resizeRaf)
-    resizeRaf = requestAnimationFrame(() => {
-      void renderCurrentPage()
-    })
+  function onZoomInClick() {
+    void withZoomAnchor(() => pdf.zoomIn())
+  }
+  function onZoomOutClick() {
+    void withZoomAnchor(() => pdf.zoomOut())
+  }
+
+  // Both fit handlers set the new zoom themselves rather than leaving it to the
+  // fitScale watcher. Two independent async reactions to the same click — the
+  // watcher restoring its anchor and the handler scrolling — landed in
+  // unpredictable order and the loser's scroll position was silently discarded.
+  // Setting the scale here means the watcher sees no change and stands down.
+  function applyFit(mutate: () => void): number | null {
+    setFitAnchor(pdf.currentPage)
+    mutate()
+    const scale = fitScale().value
+    if (scale !== null) pdf.setZoom(scale)
+    return scale
+  }
+
+  function onZoomFitWidthClick() {
+    const anchor = captureScrollAnchor()
+    applyFit(() => pdf.zoomFitWidth())
+    void nextTick(() => restoreScrollAnchor(anchor))
+  }
+
+  // Fitting a whole page only reads as "fit" if that page is the one on screen,
+  // so this one snaps to the current page instead of holding the scroll anchor.
+  function onZoomFitPageClick() {
+    applyFit(() => pdf.zoomFitPage())
+    void nextTick(() => scrollToPage(pdf.currentPage, 'auto'))
   }
 
   onMounted(() => {
+    const wrap = refs.canvasWrap.value
+    if (wrap) {
+      setContainerSize(wrap.clientWidth, wrap.clientHeight)
+      // ResizeObserver rather than window 'resize': the right sidebar is
+      // user-resizable, and dragging it changes the viewer's width without the
+      // window ever resizing.
+      resizeObserver = new ResizeObserver(() => {
+        const el = refs.canvasWrap.value
+        if (el) setContainerSize(el.clientWidth, el.clientHeight)
+      })
+      resizeObserver.observe(wrap)
+    }
+
     window.addEventListener('pdf:wheel-zoom', onWheelZoomEvent)
     window.addEventListener('pdf:zoom-key', onZoomKey)
-    window.addEventListener('resize', onResize)
     cleanups.push(
       () => window.removeEventListener('pdf:wheel-zoom', onWheelZoomEvent),
       () => window.removeEventListener('pdf:zoom-key', onZoomKey),
-      () => window.removeEventListener('resize', onResize),
     )
   })
+
+  // Fit modes stay live: the computed scale reacts to container size, page
+  // measurements landing, rotation, and single/double view, and pushes the result
+  // into the store.
+  watch(
+    fitScale(),
+    (scale) => {
+      if (scale === null) return
+      if (Math.abs(scale - pdf.zoom) < 0.0005) return
+      void withZoomAnchor(() => pdf.setZoom(scale))
+    },
+    { immediate: true },
+  )
+
+  watch(
+    () => pdf.zoom,
+    (z) => {
+      refs.zoomLabel.value = `${Math.round(z * 100)}%`
+    },
+    { immediate: true },
+  )
 
   onBeforeUnmount(() => {
     cleanups.forEach((fn) => fn())
     cleanups = []
-    if (zoomDebounceTimer) clearTimeout(zoomDebounceTimer)
-    if (resizeRaf) cancelAnimationFrame(resizeRaf)
+    resizeObserver?.disconnect()
+    resizeObserver = null
   })
 
   return {
-    onWheel,
     startPan,
-    applyCssZoom,
-    onZoomInClick: () => {
-      pdf.zoomIn()
-      void renderCurrentPage()
-    },
-    onZoomOutClick: () => {
-      pdf.zoomOut()
-      void renderCurrentPage()
-    },
-    onZoomFitClick: () => {
-      pdf.zoomFit()
-      void renderCurrentPage()
-    },
+    onZoomInClick,
+    onZoomOutClick,
+    onZoomFitWidthClick,
+    onZoomFitPageClick,
   }
 }

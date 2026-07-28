@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import UiButton from '@/components/ui/UiButton.vue'
 import PageThumb from '@/components/features/editor/PageThumb.vue'
+import PdfPageView from '@/components/features/editor/PdfPageView.vue'
 import BookmarkModal from '@/components/features/editor/BookmarkModal.vue'
 import SelectionToolbar from '@/components/features/editor/SelectionToolbar.vue'
 import SearchBar from '@/components/features/editor/SearchBar.vue'
@@ -13,9 +14,23 @@ import {
   type TextAnnotation,
 } from '@/stores/pdf'
 import { useEditorRefs } from '@/composables/useEditorRefs'
-import { renderCurrentPage } from '@/composables/usePdfRenderer'
+import { measureAllPages, measurePage } from '@/composables/usePageMetrics'
+import { waitForPage } from '@/composables/usePdfRenderer'
 import { gotoPage, deletePage, movePage, rotatePage } from '@/composables/usePageActions'
 import { useZoomPan } from '@/composables/useZoomPan'
+import {
+  currentRowFromScroll,
+  firstPageOfRow,
+  isScrollSyncSuppressed,
+  refreshRenderRange,
+  rowGeoms,
+  rowIndexForPage,
+  scrollToPage,
+  setContainerSize,
+  setFitAnchor,
+  useViewerScroll,
+  viewerRows,
+} from '@/composables/useViewerScroll'
 import { createPageDragHandlers } from '@/composables/useThumbnails'
 import {
   drawTextOverlays,
@@ -40,16 +55,17 @@ const route = useRoute()
 const pdf = usePdfStore()
 const refs = useEditorRefs()
 
-const canvasWrapEl = ref<HTMLDivElement | null>(null)
-const canvasStageEl = ref<HTMLDivElement | null>(null)
-const pdfCanvasEl = ref<HTMLCanvasElement | null>(null)
-const textLayerEl = ref<HTMLDivElement | null>(null)
-const textOverlayEl = ref<HTMLDivElement | null>(null)
-// Second-page render targets, used in 2-page (double) view. The right page is
-// canvas-only; no text-layer / no annotation overlay so editing flows still
-// operate on the single "current page" left side.
-const canvasStage2El = ref<HTMLDivElement | null>(null)
-const pdfCanvas2El = ref<HTMLCanvasElement | null>(null)
+// Rows of the continuous flow — one page per row in single view, one spread in
+// double view — and the running top/height of each, which is what makes
+// "scroll to page N" a plain arithmetic offset.
+const rows = viewerRows()
+const geoms = rowGeoms()
+const { renderRange } = useViewerScroll()
+
+function shouldRenderRow(rowIdx: number): boolean {
+  return rowIdx >= renderRange.value.start && rowIdx <= renderRange.value.end
+}
+
 const pageListEl = ref<HTMLDivElement | null>(null)
 // TransitionGroup template refs return the component instance, not the DOM node.
 // Bridge through a function ref so highlightActiveSidebarThumb can still query the
@@ -107,12 +123,16 @@ function textPageLabel(item: TextItem): string {
 }
 
 async function onTextItemClick(item: TextItem) {
+  let uiIdx = pdf.currentPage
   if (!item.isRepeat && item.ann.pageOriginalIdx !== undefined) {
     const ui = pdf.pageOrder.indexOf(item.ann.pageOriginalIdx)
     if (ui < 0) return
-    if (ui !== pdf.currentPage) await gotoPage(ui)
+    uiIdx = ui
+    await gotoPage(ui)
+    // The overlay this annotation lives in only exists once its page is painted.
+    await waitForPage(ui)
   }
-  editAnnotation(item.ann, item.isRepeat)
+  editAnnotation(item.ann, item.isRepeat, uiIdx)
 }
 
 function removeTextItem(item: TextItem) {
@@ -122,7 +142,22 @@ function removeTextItem(item: TextItem) {
 
 const filename = computed(() => basenameOf(pdf.filePath))
 
-const zoom = useZoomPan(() => canvasWrapEl.value)
+const zoom = useZoomPan()
+
+// One rAF per scroll burst: recompute which rows deserve a canvas, then let the
+// page readout follow the flow. The programmatic-scroll guard stops a smooth
+// "go to page 40" from re-deriving currentPage off every page it flies past.
+let scrollRaf: number | null = null
+function onScroll() {
+  if (scrollRaf !== null) return
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = null
+    refreshRenderRange()
+    if (isScrollSyncSuppressed()) return
+    const first = firstPageOfRow(currentRowFromScroll())
+    if (first !== pdf.currentPage) pdf.setCurrentPage(first)
+  })
+}
 
 function onMouseDown(e: MouseEvent) {
   if (e.button !== 0 || pdf.gridMode) return
@@ -163,11 +198,17 @@ function onAddBookmark() {
   showBookmarkModal.value = true
 }
 
-function onToggleReorder() {
+async function onToggleReorder() {
   pdf.toggleGridMode()
-  if (!pdf.gridMode) void renderCurrentPage()
+  if (pdf.gridMode) return
+  // The page flow is unmounted in grid mode; put the user back where they were.
+  await nextTick()
+  refreshRenderRange()
+  scrollToPage(pdf.currentPage, 'auto')
 }
 
+// A "page" of navigation is a whole spread in double view, which is also exactly
+// one row of the continuous flow.
 function navStep(): number {
   return pdf.viewMode === 'double' ? 2 : 1
 }
@@ -178,20 +219,41 @@ function onNext() {
   void gotoPage(pdf.currentPage + navStep())
 }
 
+// A row taller than the viewport pages through itself first; one that already
+// fits jumps a whole row — which in double view is a whole spread.
+function pageStep(dir: 1 | -1, repeat: boolean) {
+  const wrap = refs.canvasWrap.value
+  if (!wrap) return
+  const g = geoms.value[rowIndexForPage(pdf.currentPage)]
+  if (g && g.height > wrap.clientHeight) {
+    wrap.scrollBy({ top: dir * (wrap.clientHeight - 40), behavior: repeat ? 'auto' : 'smooth' })
+    return
+  }
+  void gotoPage(pdf.currentPage + dir * navStep())
+}
+
+// A spread is twice as wide as a single page, so whatever scale fitted before
+// certainly doesn't now: re-anchor the fit on the page in view and, if the user
+// had pinned an explicit zoom, fall back to fit-to-width rather than leaving them
+// with a spread hanging off both edges. The fitScale watcher applies the new
+// scale and keeps the scroll position anchored to the same page.
+function refitForSpreadChange() {
+  setFitAnchor(pdf.currentPage)
+  if (pdf.fitMode === 'none') pdf.zoomFitWidth()
+}
+
 function onToggleViewMode() {
   pdf.toggleViewMode()
   if (pdf.viewMode === 'double' && pdf.currentPage % 2 === 1) {
     // Snap to an even left-page so spreads stay aligned across navigation.
     pdf.setCurrentPage(pdf.currentPage - 1)
   }
-  pdf.fitMode = true
-  void renderCurrentPage()
+  refitForSpreadChange()
 }
 
 function onToggleDoubleGap() {
   pdf.toggleDoublePageGap()
-  pdf.fitMode = true
-  void renderCurrentPage()
+  refitForSpreadChange()
 }
 
 function onKeyDown(e: KeyboardEvent) {
@@ -206,24 +268,51 @@ function onKeyDown(e: KeyboardEvent) {
   const t = e.target as HTMLElement
   if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return
   if (t.isContentEditable) return
-  if (e.key === 'ArrowLeft' || e.key === 'PageUp') onPrev()
-  else if (e.key === 'ArrowRight' || e.key === 'PageDown') onNext()
-  else if (e.key === 'Escape') {
+  const wrap = refs.canvasWrap.value
+  // html/body have overflow:hidden and the wrap isn't focusable, so the browser
+  // provides no keyboard scrolling of its own — every key below has to move the
+  // flow explicitly. Held keys scroll instantly: a smooth animation restarted
+  // every ~30ms by key repeat looks frozen.
+  if (e.key === 'ArrowLeft') {
+    e.preventDefault()
+    onPrev()
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault()
+    onNext()
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    wrap?.scrollBy({ top: -60, behavior: e.repeat ? 'auto' : 'smooth' })
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    wrap?.scrollBy({ top: 60, behavior: e.repeat ? 'auto' : 'smooth' })
+  } else if (e.key === 'PageUp') {
+    e.preventDefault()
+    pageStep(-1, e.repeat)
+  } else if (e.key === 'PageDown' || (e.key === ' ' && !e.shiftKey)) {
+    e.preventDefault()
+    pageStep(1, e.repeat)
+  } else if (e.key === 'Home') {
+    e.preventDefault()
+    wrap?.scrollTo({ top: 0, behavior: 'smooth' })
+  } else if (e.key === 'End') {
+    e.preventDefault()
+    wrap?.scrollTo({ top: wrap.scrollHeight, behavior: 'smooth' })
+  } else if (e.key === 'Escape') {
     if (search.visible.value) {
       closeSearch()
       return
     }
     if (pdf.pendingTextPlacement) {
       pdf.pendingTextPlacement = null
-      canvasWrapEl.value?.classList.remove('placing-text')
+      refs.canvasWrap.value?.classList.remove('placing-text')
     }
     if (isEditorActive()) cancelEditor()
   }
 }
 
-function onPageRendered() {
-  drawTextOverlays()
-  highlightActiveSidebarThumb()
+function onPageRendered(e: Event) {
+  const detail = (e as CustomEvent<{ uiIdx: number }>).detail
+  drawTextOverlays(detail?.uiIdx)
   // Text-layer spans were just rebuilt — re-apply any active search highlights.
   applySearchHighlights()
 }
@@ -241,9 +330,29 @@ function onPageRendered() {
 // fenced too, and the release is caught on the document, because a text drag very
 // often ends outside the layer — pdf.js's layer-bound mouseup then never fires and
 // the sentinel stays active with a stale top, poisoning the *next* selection.
+//
+// With every page stacked in one container, only the page the press landed on is
+// fenced. Each page owns its sentinel and each sentinel is clipped to its own
+// page, so a drag that runs on into the next page still extends normally there.
+function layerUnderPress(e: MouseEvent): HTMLElement | null {
+  const target = e.target as Element | null
+  const direct = target?.closest<HTMLElement>('.text-layer')
+  if (direct) return direct
+  // Pressed in the grey margin: fence whichever page the pointer is level with.
+  const wrap = refs.canvasWrap.value
+  if (!wrap) return null
+  for (const stage of wrap.querySelectorAll<HTMLElement>('.canvas-stage[data-rendered="1"]')) {
+    const r = stage.getBoundingClientRect()
+    if (e.clientY >= r.top && e.clientY <= r.bottom) {
+      return stage.querySelector<HTMLElement>('.text-layer')
+    }
+  }
+  return null
+}
+
 function onSelectionFenceDown(e: MouseEvent) {
   if (e.button !== 0 || pdf.gridMode) return
-  const layer = textLayerEl.value
+  const layer = layerUnderPress(e)
   if (!layer) return
   const end = layer.querySelector<HTMLDivElement>('.end-of-content')
   if (!end) return
@@ -261,12 +370,12 @@ function onSelectionFenceDown(e: MouseEvent) {
 }
 
 function onSelectionFenceUp() {
-  const layer = textLayerEl.value
-  if (!layer) return
-  const end = layer.querySelector<HTMLDivElement>('.end-of-content')
-  if (!end) return
-  end.style.top = ''
-  end.classList.remove('active')
+  const wrap = refs.canvasWrap.value
+  if (!wrap) return
+  for (const end of wrap.querySelectorAll<HTMLDivElement>('.end-of-content')) {
+    end.style.top = ''
+    end.classList.remove('active')
+  }
 }
 
 function highlightActiveSidebarThumb() {
@@ -274,6 +383,11 @@ function highlightActiveSidebarThumb() {
   if (!list) return
   const active = list.querySelector(`[data-ui-idx="${pdf.currentPage}"]`) as HTMLElement | null
   if (!active) return
+  // Only recentre once the active thumb has actually left the visible box. The
+  // current page is now derived from scrolling, so an unconditional recentre
+  // fires continuously and makes the strip impossible to browse by hand.
+  const offset = active.offsetTop - list.scrollTop
+  if (offset >= 0 && offset + active.clientHeight <= list.clientHeight) return
   const target = active.offsetTop - list.clientHeight / 2 + active.clientHeight / 2
   const max = list.scrollHeight - list.clientHeight
   list.scrollTop = Math.max(0, Math.min(target, max))
@@ -468,27 +582,25 @@ function onBookmarkInputKeydown(e: KeyboardEvent) {
   e.stopPropagation()
 }
 
-// When grid-mode toggles back to single-page, the canvas may need a fit re-render
+// The thumb strip follows whichever page the flow has settled on.
+watch(() => pdf.currentPage, highlightActiveSidebarThumb)
+
+// Row geometry changes for every reason that matters — zoom, page count, single
+// vs double view, a page measurement landing — so this is the single place that
+// keeps the render window honest.
+watch(geoms, refreshRenderRange, { flush: 'post' })
+
+// Placed annotations are positioned imperatively in scaled pixels, so they follow
+// a zoom change immediately rather than waiting for the debounced repaint.
 watch(
-  () => pdf.gridMode,
-  (next) => {
-    if (!next) void renderCurrentPage()
-  },
+  () => pdf.zoom,
+  () => drawTextOverlays(),
 )
 
 onMounted(async () => {
-  // Wire the editor refs to the actual DOM nodes for the imperative composables.
-  refs.canvasWrap.value = canvasWrapEl.value
-  refs.canvasStage.value = canvasStageEl.value
-  refs.pdfCanvas.value = pdfCanvasEl.value
-  refs.textLayer.value = textLayerEl.value
-  refs.textOverlay.value = textOverlayEl.value
-  refs.canvasStage2.value = canvasStage2El.value
-  refs.pdfCanvas2.value = pdfCanvas2El.value
-
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('pdf:page-rendered', onPageRendered)
-  canvasWrapEl.value?.addEventListener('mousedown', onSelectionFenceDown)
+  refs.canvasWrap.value?.addEventListener('mousedown', onSelectionFenceDown)
   document.addEventListener('mouseup', onSelectionFenceUp)
 
   // If the user landed on /editor without a loaded doc, bounce back to welcome.
@@ -496,30 +608,39 @@ onMounted(async () => {
     void router.replace({ name: 'welcome' })
     return
   }
-  // First render
-  await renderCurrentPage()
+  // Size the container before the first fit is computed, otherwise the document
+  // paints one frame at 100% before the ResizeObserver reports and fit-to-width
+  // lands — a visible lurch on open.
+  const wrap = refs.canvasWrap.value
+  if (wrap) setContainerSize(wrap.clientWidth, wrap.clientHeight)
+  // Likewise pay for the first page's real box up front: fitting to the 612×792
+  // placeholder and then correcting is a visible jump on any non-Letter document.
+  const first = pdf.pageOrder[0]
+  if (first !== undefined) await measurePage(first, pdf.rotationFor(first))
+  // The rest stream in and the flow settles as they land.
+  void measureAllPages()
+  await nextTick()
+  refreshRenderRange()
+  highlightActiveSidebarThumb()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('pdf:page-rendered', onPageRendered)
-  canvasWrapEl.value?.removeEventListener('mousedown', onSelectionFenceDown)
+  refs.canvasWrap.value?.removeEventListener('mousedown', onSelectionFenceDown)
   document.removeEventListener('mouseup', onSelectionFenceUp)
-  // Clear refs so other screens don't accidentally read stale DOM.
-  refs.canvasWrap.value = null
-  refs.canvasStage.value = null
-  refs.pdfCanvas.value = null
-  refs.textLayer.value = null
-  refs.textOverlay.value = null
-  refs.canvasStage2.value = null
-  refs.pdfCanvas2.value = null
+  if (scrollRaf !== null) cancelAnimationFrame(scrollRaf)
 })
 </script>
 
 <template>
   <section
     class="editor grid h-full grid-rows-1 gap-3 p-3"
-    :style="{ '--right-sidebar-width': `${rightSidebarWidth}px` }"
+    :style="{
+      '--right-sidebar-width': `${rightSidebarWidth}px`,
+      '--page-gap': `${PDF_CONFIG.PAGE_GAP_PX}px`,
+      '--page-pad': `${PDF_CONFIG.CANVAS_PADDING / 2}px`,
+    }"
   >
     <aside
       class="glass left-sidebar flex min-h-0 flex-col overflow-hidden rounded-[14px]"
@@ -756,28 +877,36 @@ onBeforeUnmount(() => {
            when the user zooms in and the canvas overflows. -->
       <div class="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div
-          ref="canvasWrapEl"
+          :ref="refs.canvasWrap"
           class="canvas-wrap"
-          :class="[
-            { 'grid-mode': pdf.gridMode },
-            { 'view-double': pdf.viewMode === 'double', 'gap-on': pdf.doublePageGap },
-            `mode-${pdf.interactionMode}`,
-          ]"
-          @wheel="zoom.onWheel"
+          :class="[{ 'grid-mode': pdf.gridMode }, `mode-${pdf.interactionMode}`]"
+          @scroll.passive="onScroll"
           @mousedown="onMouseDown"
         >
-          <div class="spread">
-            <div ref="canvasStageEl" class="canvas-stage">
-              <canvas ref="pdfCanvasEl" />
-              <div ref="textLayerEl" class="text-layer" />
-              <div ref="textOverlayEl" class="text-overlay" />
-            </div>
+          <!-- Every page of the document is mounted, so the scroll height is
+               real and the browser does the scrolling. Only rows near the
+               viewport get a painted canvas — see shouldRenderRow. -->
+          <div v-if="!pdf.gridMode" class="page-flow">
             <div
-              v-show="pdf.viewMode === 'double'"
-              ref="canvasStage2El"
-              class="canvas-stage canvas-stage-right"
+              v-for="row in rows"
+              :key="row.key"
+              class="page-row"
+              :style="{
+                height: `${geoms[row.rowIdx]?.height ?? 0}px`,
+                gap: `${row.gapPx}px`,
+              }"
             >
-              <canvas ref="pdfCanvas2El" />
+              <PdfPageView
+                v-for="p in row.pages"
+                :key="p.origIdx"
+                :ui-idx="p.uiIdx"
+                :orig-idx="p.origIdx"
+                :rotation="p.rotation"
+                :base-width="p.width"
+                :base-height="p.height"
+                :scale="pdf.zoom"
+                :should-render="shouldRenderRow(row.rowIdx)"
+              />
             </div>
           </div>
           <TransitionGroup
@@ -929,7 +1058,38 @@ onBeforeUnmount(() => {
           {{ refs.zoomLabel.value }}
         </span>
         <UiButton variant="default" size="icon" title="Zoom in" @click="zoom.onZoomInClick">+</UiButton>
-        <UiButton variant="default" size="icon" title="Fit to page" @click="zoom.onZoomFitClick">
+        <UiButton
+          variant="default"
+          size="icon"
+          title="Fit to width"
+          :toggled="pdf.fitMode === 'width'"
+          @click="zoom.onZoomFitWidthClick"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <line x1="3" y1="5" x2="3" y2="19" />
+            <line x1="21" y1="5" x2="21" y2="19" />
+            <line x1="7" y1="12" x2="17" y2="12" />
+            <polyline points="10 9 7 12 10 15" />
+            <polyline points="14 9 17 12 14 15" />
+          </svg>
+        </UiButton>
+        <UiButton
+          variant="default"
+          size="icon"
+          title="Fit to page"
+          :toggled="pdf.fitMode === 'page'"
+          @click="zoom.onZoomFitPageClick"
+        >
           <svg
             viewBox="0 0 24 24"
             width="14"
@@ -1353,23 +1513,45 @@ onBeforeUnmount(() => {
   color: #fff;
 }
 
-/* Canvas-wrap — precise positioning is required, scoped block holds the legacy CSS verbatim. */
+/* Canvas-wrap — the scroll container for the continuous page flow. Pixel-precise
+ * positioning, so this stays hand-written CSS rather than Tailwind. */
 .canvas-wrap {
   flex: 1 1 0;
   min-height: 0;
   border-radius: 14px;
   overflow: auto;
+  /* Reserve the scrollbar track at all times. Otherwise fit-to-width depends on
+   * whether a vertical scrollbar happens to be showing — which is decided by the
+   * very scale being computed, a loop that oscillates by the scrollbar's width. */
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
   background: rgba(0, 0, 0, 0.25);
   border: 1px solid var(--color-glass-border);
-  display: flex;
-  align-items: safe flex-start;
-  justify-content: safe center;
-  padding: 24px;
   position: relative;
 }
-.canvas-wrap.placing-text,
-.canvas-wrap.placing-text * {
-  cursor: crosshair !important;
+
+/* The flow's gap and padding are the CSS half of the geometry computed in
+ * useViewerScroll — a disagreement of either lands every scroll-to-page off by
+ * that much — so both come straight from PDF_CONFIG via the custom properties
+ * bound on the root element rather than being repeated as literals here. */
+.page-flow {
+  display: flex;
+  flex-direction: column;
+  /* "safe" keeps the top-left corner of an over-wide page reachable instead of
+   * letting centring push it past the scroll origin. */
+  align-items: safe center;
+  gap: var(--page-gap);
+  /* Padding sits on the flow, not on the scroll container: Chromium drops a
+   * scroll container's end padding once its content overflows. */
+  padding: var(--page-pad);
+  width: max-content;
+  min-width: 100%;
+}
+
+.page-row {
+  display: flex;
+  align-items: flex-start;
+  flex-shrink: 0;
 }
 
 /* Floating mode toggle, pinned to the top-left of the canvas-wrap. Stays in viewport
@@ -1410,48 +1592,11 @@ onBeforeUnmount(() => {
   background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
   color: #fff;
 }
-/* Spread = the wrapper that holds the left page (and the right page in
- * 2-page view). In single mode it contains one stage and behaves the same as
- * before; in double mode it lays out the two stages side by side and the
- * gap-on modifier inserts a visible gap between them. */
-.spread {
-  display: flex;
-  align-items: flex-start;
-  flex-shrink: 0;
-}
-.canvas-wrap.view-double.gap-on .spread {
-  gap: 16px;
-}
-
-.canvas-stage {
-  position: relative;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  border-radius: 4px;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-.canvas-stage :deep(canvas#pdfCanvas),
-.canvas-stage :deep(canvas) {
-  display: block;
-  background: #fff;
-}
-.canvas-stage.panning,
-.canvas-stage.panning * {
-  cursor: grabbing !important;
-  user-select: none !important;
-}
-.canvas-wrap.grid-mode {
-  padding: 24px;
-  align-items: flex-start;
-}
-.canvas-wrap.grid-mode .canvas-stage,
-.canvas-wrap.grid-mode .spread {
-  display: none;
-}
 .grid-view {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 18px;
+  padding: 24px;
   width: 100%;
   align-content: start;
 }
@@ -1633,7 +1778,7 @@ onBeforeUnmount(() => {
 
 body.text-dragging,
 body.text-dragging * {
-  cursor: grabbing !important;
+  cursor: var(--cursor-grabbing) !important;
   user-select: none !important;
 }
 
@@ -1641,6 +1786,22 @@ body.resizing-sidebar,
 body.resizing-sidebar * {
   cursor: ew-resize !important;
   user-select: none !important;
+}
+
+/* Cursor overrides for the page area. The tokens are defined in main.css; they
+ * exist because a machine configured with a white system pointer has no visible
+ * cursor over a white PDF page. */
+.canvas-wrap {
+  cursor: var(--cursor-default);
+}
+.canvas-wrap.panning,
+.canvas-wrap.panning * {
+  cursor: var(--cursor-grabbing) !important;
+  user-select: none !important;
+}
+.canvas-wrap.placing-text,
+.canvas-wrap.placing-text * {
+  cursor: var(--cursor-crosshair) !important;
 }
 
 /* Text layer — selectable text over the canvas */
@@ -1652,7 +1813,7 @@ body.resizing-sidebar * {
   line-height: 1;
   pointer-events: auto;
   z-index: 2;
-  cursor: text;
+  cursor: var(--cursor-text);
   forced-color-adjust: none;
   user-select: text !important;
   -webkit-user-select: text !important;
@@ -1666,7 +1827,7 @@ body.resizing-sidebar * {
   color: transparent;
   position: absolute;
   white-space: pre;
-  cursor: text;
+  cursor: var(--cursor-text);
   transform-origin: 0% 0%;
   user-select: text !important;
   -webkit-user-select: text !important;
@@ -1676,7 +1837,7 @@ body.resizing-sidebar * {
  * wants to drag, not select. Disabling pointer-events lets clicks fall through to the
  * canvas-wrap mousedown handler, which starts the pan. */
 .canvas-wrap.mode-pan {
-  cursor: grab;
+  cursor: var(--cursor-grab);
 }
 /* pdf.js endOfContent technique. The sentinel sits below the spans (z-index: -1)
  * with user-select: none. On mousedown its top is set to the click's Y % so it
@@ -1689,7 +1850,7 @@ body.resizing-sidebar * {
   position: absolute;
   inset: 100% 0 0;
   z-index: -1;
-  cursor: default;
+  cursor: var(--cursor-default);
   user-select: none !important;
   -webkit-user-select: none !important;
 }
@@ -1701,7 +1862,7 @@ body.resizing-sidebar * {
 .canvas-wrap.mode-pan .text-layer span,
 .canvas-wrap.mode-pan .text-layer br {
   pointer-events: none;
-  cursor: grab;
+  cursor: var(--cursor-grab);
   user-select: none !important;
   -webkit-user-select: none !important;
 }
@@ -1739,7 +1900,7 @@ body.resizing-sidebar * {
   position: absolute;
   white-space: pre;
   pointer-events: auto;
-  cursor: grab;
+  cursor: var(--cursor-grab);
   user-select: none;
   transition: outline-color 0.15s var(--ease-out-soft), box-shadow 0.15s var(--ease-out-soft);
   outline: 1px dashed transparent;
@@ -1750,7 +1911,7 @@ body.resizing-sidebar * {
   outline-color: var(--color-accent);
 }
 .text-overlay .placed-text.dragging {
-  cursor: grabbing;
+  cursor: var(--cursor-grabbing);
   outline-color: var(--color-accent-2);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
@@ -1768,7 +1929,7 @@ body.resizing-sidebar * {
   border-radius: 50%;
   font-size: 11px;
   line-height: 1;
-  cursor: pointer;
+  cursor: var(--cursor-pointer);
   opacity: 0;
   transform: scale(0.7);
   transition: opacity 0.15s var(--ease-out-soft), transform 0.15s var(--ease-out-soft);
@@ -1826,7 +1987,7 @@ body.resizing-sidebar * {
 }
 .inline-text-toolbar select.tb-input {
   padding-right: 4px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer);
 }
 .inline-text-toolbar select.tb-input option {
   background: #1a1a2e;
@@ -1848,7 +2009,7 @@ body.resizing-sidebar * {
   border-radius: 6px;
   border: 1px solid var(--color-glass-border);
   background: transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer);
   overflow: hidden;
 }
 .inline-text-toolbar .tb-color::-webkit-color-swatch-wrapper {
@@ -1869,7 +2030,7 @@ body.resizing-sidebar * {
   color: var(--color-fg-dim);
   font-size: 12px;
   line-height: 1;
-  cursor: pointer;
+  cursor: var(--cursor-pointer);
   transition: background 0.12s var(--ease-out-soft), color 0.12s var(--ease-out-soft);
 }
 .inline-text-toolbar .tb-btn:hover {
@@ -1904,12 +2065,12 @@ body.resizing-sidebar * {
   font-size: 11px;
   color: var(--color-fg-dim);
   padding: 0 4px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer);
   white-space: nowrap;
 }
 .inline-text-toolbar .tb-check input {
   margin: 0;
-  cursor: pointer;
+  cursor: var(--cursor-pointer);
 }
 
 .text-overlay .placed-text-badge {

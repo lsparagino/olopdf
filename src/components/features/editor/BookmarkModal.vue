@@ -10,7 +10,14 @@ const pdf = usePdfStore()
 const title = ref('')
 const inputEl = ref<HTMLInputElement | null>(null)
 
-const pageNumber = computed(() => pdf.currentPage + 1)
+// The captured selection knows which page it came from, and that is the page the
+// bookmark belongs to. pdf.currentPage is derived from the scroll position, so by
+// the time the modal is open it is simply whichever row the flow settled on.
+const anchorUiIdx = computed(() => {
+  const origIdx = pdf.capturedSelection?.pageOriginalIdx
+  return origIdx !== undefined ? pdf.pageOrder.indexOf(origIdx) : pdf.currentPage
+})
+const pageNumber = computed(() => anchorUiIdx.value + 1)
 const isAnchored = computed(() => !!pdf.capturedSelection)
 
 watch(open, (v) => {
@@ -35,7 +42,7 @@ function add() {
   const sel = pdf.capturedSelection
   pdf.addBookmark({
     title: t,
-    pageOriginalIdx: pdf.pageOrder[pdf.currentPage],
+    pageOriginalIdx: sel?.pageOriginalIdx ?? pdf.pageOrder[pdf.currentPage],
     level: 0,
     ...(sel ? { x: sel.x, y: sel.y } : {}),
   })

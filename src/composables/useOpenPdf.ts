@@ -6,6 +6,8 @@ import { toast } from '@/composables/useToast'
 import { addRecent } from '@/composables/useRecents'
 import { type Bookmark, usePdfStore } from '@/stores/pdf'
 import { usePdfjs } from '@/composables/usePdfEngine'
+import { resetPageMetrics } from '@/composables/usePageMetrics'
+import { resetViewerScroll } from '@/composables/useViewerScroll'
 
 interface OutlineNode {
   title: string
@@ -53,6 +55,11 @@ export async function loadPdfBytes(arrayBuffer: ArrayBuffer, filePath: string | 
   const doc = await pdfjs.getDocument({ data: pdfjsCopy }).promise
   const store = usePdfStore()
   store.resetForNewDocument(arrayBuffer, filePath, doc, doc.numPages)
+  // The viewer's geometry caches are module singletons that outlive the editor
+  // screen, so clear them here rather than relying on the screen remounting —
+  // opening a document from within the editor never unmounts it.
+  resetPageMetrics()
+  resetViewerScroll()
   // Read the source PDF's existing /Outlines tree (if any) and seed the store
   // so the bookmarks panel reflects what the file already has.
   const imported = await importBookmarksFromOutline(doc)

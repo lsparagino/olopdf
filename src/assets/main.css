@@ -26,6 +26,47 @@
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
 
+/* Cursors for the PDF page area.
+ *
+ * Windows lets the user pick a pointer colour (Settings > Accessibility > Mouse
+ * pointer), and on a machine set to the white pointer every system cursor
+ * disappears against a white PDF page. A CSS cursor image is composited by
+ * Chromium rather than taken from the OS cursor theme, so drawing our own — dark
+ * glyph, white halo — makes the pointer readable over both the page and the dark
+ * app chrome regardless of the machine's settings. Each one keeps the native
+ * keyword as a fallback in case the image fails to decode.
+ *
+ * Kept under 32px: Chromium ignores cursor images larger than 128x128. */
+:root {
+  --cursor-default: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%3E%3Cpath%20d='M3%202L3%2018.5L7.2%2014.7L9.9%2020.8L13%2019.4L10.3%2013.5L16%2013.5Z'%20fill='%23141422'%20stroke='%23ffffff'%20stroke-width='1.7'%20stroke-linejoin='round'/%3E%3C/svg%3E")
+    3 2, default;
+  --cursor-text: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%3E%3Cg%20fill='none'%20stroke-linecap='round'%3E%3Cpath%20d='M12%204V20M8.6%204H15.4M8.6%2020H15.4'%20stroke='%23ffffff'%20stroke-width='4.2'/%3E%3Cpath%20d='M12%204V20M8.6%204H15.4M8.6%2020H15.4'%20stroke='%23141422'%20stroke-width='1.7'/%3E%3C/g%3E%3C/svg%3E")
+    12 12, text;
+  --cursor-crosshair: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%3E%3Cg%20fill='none'%20stroke-linecap='round'%3E%3Cpath%20d='M12%202.5V21.5M2.5%2012H21.5'%20stroke='%23ffffff'%20stroke-width='4'/%3E%3Cpath%20d='M12%202.5V21.5M2.5%2012H21.5'%20stroke='%23141422'%20stroke-width='1.6'/%3E%3C/g%3E%3C/svg%3E")
+    12 12, crosshair;
+  --cursor-grab: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='26'%20height='26'%20viewBox='0%200%2024%2024'%3E%3Cg%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cg%20stroke='%23ffffff'%20stroke-width='3.6'%3E%3Cpath%20d='M18%2011V6.5a1.5%201.5%200%200%200-3%200V11'/%3E%3Cpath%20d='M15%2010.5V4.5a1.5%201.5%200%200%200-3%200v6.5'/%3E%3Cpath%20d='M12%2010.5V5.5a1.5%201.5%200%200%200-3%200v8'/%3E%3Cpath%20d='M9%2013.5V8.5a1.5%201.5%200%200%200-3%200V16l1.5%203a5.5%205.5%200%200%200%205%203h2a5.5%205.5%200%200%200%205.5-5.5V11a1.5%201.5%200%200%200-3%200'/%3E%3C/g%3E%3Cg%20stroke='%23141422'%20stroke-width='1.5'%3E%3Cpath%20d='M18%2011V6.5a1.5%201.5%200%200%200-3%200V11'/%3E%3Cpath%20d='M15%2010.5V4.5a1.5%201.5%200%200%200-3%200v6.5'/%3E%3Cpath%20d='M12%2010.5V5.5a1.5%201.5%200%200%200-3%200v8'/%3E%3Cpath%20d='M9%2013.5V8.5a1.5%201.5%200%200%200-3%200V16l1.5%203a5.5%205.5%200%200%200%205%203h2a5.5%205.5%200%200%200%205.5-5.5V11a1.5%201.5%200%200%200-3%200'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")
+    13 13, grab;
+  --cursor-grabbing: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='26'%20height='26'%20viewBox='0%200%2024%2024'%3E%3Cg%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cg%20stroke='%23ffffff'%20stroke-width='3.6'%3E%3Cpath%20d='M18%2012.5V11a1.5%201.5%200%200%200-3%200'/%3E%3Cpath%20d='M15%2011.5v-1a1.5%201.5%200%200%200-3%200v1'/%3E%3Cpath%20d='M12%2011.5v-1a1.5%201.5%200%200%200-3%200v3'/%3E%3Cpath%20d='M9%2014V9.5a1.5%201.5%200%200%200-3%200V16l1.5%203a5.5%205.5%200%200%200%205%203h2a5.5%205.5%200%200%200%205.5-5.5V12.5a1.5%201.5%200%200%200-3%200'/%3E%3C/g%3E%3Cg%20stroke='%23141422'%20stroke-width='1.5'%3E%3Cpath%20d='M18%2012.5V11a1.5%201.5%200%200%200-3%200'/%3E%3Cpath%20d='M15%2011.5v-1a1.5%201.5%200%200%200-3%200v1'/%3E%3Cpath%20d='M12%2011.5v-1a1.5%201.5%200%200%200-3%200v3'/%3E%3Cpath%20d='M9%2014V9.5a1.5%201.5%200%200%200-3%200V16l1.5%203a5.5%205.5%200%200%200%205%203h2a5.5%205.5%200%200%200%205.5-5.5V12.5a1.5%201.5%200%200%200-3%200'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")
+    13 13, grabbing;
+  --cursor-pointer: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%3E%3Cg%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cg%20stroke='%23ffffff'%20stroke-width='4'%3E%3Cpath%20d='M9%2011V4.6a1.6%201.6%200%200%201%203.2%200V10'/%3E%3Cpath%20d='M12.2%2010.2V8.6a1.6%201.6%200%200%201%203.2%200v1.8'/%3E%3Cpath%20d='M15.4%2010.6V9.4a1.6%201.6%200%200%201%203.2%200V16a5.5%205.5%200%200%201-5.5%205.5h-1.6A5.5%205.5%200%200%201%206%2016v-2.2l-1.7-1.7a1.6%201.6%200%200%201%202.3-2.3L9%2012'/%3E%3C/g%3E%3Cg%20stroke='%23141422'%20stroke-width='1.5'%3E%3Cpath%20d='M9%2011V4.6a1.6%201.6%200%200%201%203.2%200V10'/%3E%3Cpath%20d='M12.2%2010.2V8.6a1.6%201.6%200%200%201%203.2%200v1.8'/%3E%3Cpath%20d='M15.4%2010.6V9.4a1.6%201.6%200%200%201%203.2%200V16a5.5%205.5%200%200%201-5.5%205.5h-1.6A5.5%205.5%200%200%201%206%2016v-2.2l-1.7-1.7a1.6%201.6%200%200%201%202.3-2.3L9%2012'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")
+    9 3, pointer;
+}
+
+/* Escape hatch for anyone who deliberately enlarged their Windows pointer: our
+ * images track display DPI but not the accessibility pointer-size slider, so
+ * they would come out smaller than that user asked for. Turns a support ticket
+ * into one devtools line instead of a rebuild:
+ *   localStorage.setItem('olopdf:system-cursors', '1'); location.reload()
+ */
+body.system-cursors {
+  --cursor-default: default;
+  --cursor-text: text;
+  --cursor-crosshair: crosshair;
+  --cursor-grab: grab;
+  --cursor-grabbing: grabbing;
+  --cursor-pointer: pointer;
+}
+
 @layer base {
   *,
   *::before,

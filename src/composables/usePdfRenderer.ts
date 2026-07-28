@@ -1,6 +1,6 @@
-import { usePdfStore, PDF_CONFIG } from '@/stores/pdf'
 import { usePdfjs } from '@/composables/usePdfEngine'
-import { useEditorRefs } from '@/composables/useEditorRefs'
+import { loadPage } from '@/composables/usePageMetrics'
+import { pageElsAt, type PageEls } from '@/composables/usePageElements'
 import { shouldScaleTextRun, textRunOrigin } from '@/utils/textLayer'
 
 interface RenderTaskLike {
@@ -46,166 +46,189 @@ interface PdfjsUtilLike {
   }
 }
 
-let activeRenderTask: RenderTaskLike | null = null
-let activeRightRenderTask: RenderTaskLike | null = null
+export interface RenderPageOpts {
+  origIdx: number
+  rotation: number
+  scale: number
+}
 
-// Every renderCurrentPage() call claims a token and abandons its work as soon as
-// a newer call has claimed one. Page loads and getTextContent() are async and
-// renderCurrentPage is fired from a dozen places (page flips, zoom debounce,
-// resize, rotate, delete), so without this a slow render of page N can land
-// after page N+1 and leave page N's spans in the text layer above page N+1's
-// bitmap — selection then picks up text that isn't on screen at all.
-let renderToken = 0
+// Backing-store budget per page canvas. The continuous viewer keeps a handful of
+// canvases alive at once, so an uncapped devicePixelRatio at high zoom would
+// multiply into hundreds of megabytes long before Chromium's own per-canvas
+// ceiling kicks in. Above the budget we drop back towards dpr 1 and let the
+// browser upscale — a zoomed-in page is already being read at a size where the
+// difference is invisible.
+const MAX_CANVAS_PIXELS = 12_000_000
 
-// CSS-pixel gap drawn between the two pages in double-page mode when
-// pdf.doublePageGap is on. Constant, not zoom-scaled.
-const DOUBLE_PAGE_GAP_PX = 16
+interface PageRenderState {
+  // Per-page token. The single global token of the old one-page-at-a-time
+  // renderer cannot work here: several pages render concurrently, so page 7
+  // finishing would abandon page 8's in-flight work.
+  token: number
+  task: RenderTaskLike | null
+  canvasKey: string | null
+  textKey: string | null
+}
 
-export async function renderCurrentPage(): Promise<void> {
-  const token = ++renderToken
-  const pdf = usePdfStore()
-  const refs = useEditorRefs()
-  const wrap = refs.canvasWrap.value
-  const canvas = refs.pdfCanvas.value
-  const stage = refs.canvasStage.value
-  if (!pdf.pdfjsDoc || !wrap || !canvas || !stage) return
-  if (pdf.pageOrder.length === 0) return
-  if (pdf.currentPage >= pdf.pageOrder.length) pdf.currentPage = pdf.pageOrder.length - 1
-  if (pdf.currentPage < 0) pdf.currentPage = 0
+const renderStates = new WeakMap<HTMLElement, PageRenderState>()
 
-  const origIdx = pdf.pageOrder[pdf.currentPage]
-  const page = (await pdf.pdfjsDoc.getPage(origIdx + 1)) as PdfPageLike
-  if (token !== renderToken) return
-  const rotation = pdf.rotationFor(origIdx)
+function stateFor(stage: HTMLElement): PageRenderState {
+  let st = renderStates.get(stage)
+  if (!st) {
+    st = { token: 0, task: null, canvasKey: null, textKey: null }
+    renderStates.set(stage, st)
+  }
+  return st
+}
 
-  const baseViewport = page.getViewport({ scale: 1, rotation })
+function renderKey(opts: RenderPageOpts, dpr: number): string {
+  return `${opts.origIdx}:${opts.rotation}:${opts.scale.toFixed(4)}:${dpr.toFixed(2)}`
+}
 
-  // In double mode, also load the right page so the fit calculation accounts
-  // for the combined width and the maximum height across both pages. Skipped
-  // when there's no next page (last page; we render single-page on the left).
-  const rightPageInfo = await loadRightPage()
-  if (token !== renderToken) return
+function effectiveDpr(width: number, height: number): number {
+  const dpr = window.devicePixelRatio || 1
+  const px = width * height
+  if (px <= 0) return dpr
+  const budgeted = Math.sqrt(MAX_CANVAS_PIXELS / px)
+  return Math.max(1, Math.min(dpr, budgeted))
+}
 
-  let scale = pdf.zoom
-  if (pdf.fitMode) {
-    const gap = rightPageInfo && pdf.doublePageGap ? DOUBLE_PAGE_GAP_PX : 0
-    const aw = wrap.clientWidth - PDF_CONFIG.CANVAS_PADDING - gap
-    const ah = wrap.clientHeight - PDF_CONFIG.CANVAS_PADDING
-    const totalW = baseViewport.width + (rightPageInfo?.baseViewport.width ?? 0)
-    const maxH = Math.max(baseViewport.height, rightPageInfo?.baseViewport.height ?? 0)
-    scale = Math.min(aw / totalW, ah / maxH)
-    if (!isFinite(scale) || scale <= 0) scale = 1.0
-    pdf.zoom = scale
+// Lays out the page box without painting it. Called on every scale change so the
+// flow reflows immediately; the already-painted bitmap stretches with it (briefly
+// soft) until the debounced repaint lands.
+export function sizePageEls(els: PageEls, width: number, height: number): void {
+  const w = `${width}px`
+  const h = `${height}px`
+  els.stage.style.width = w
+  els.stage.style.height = h
+  els.canvas.style.width = w
+  els.canvas.style.height = h
+  els.textLayer.style.width = w
+  els.textLayer.style.height = h
+  els.textOverlay.style.width = w
+  els.textOverlay.style.height = h
+}
+
+export function isPageRendered(uiIdx: number): boolean {
+  const els = pageElsAt(uiIdx)
+  return !!els && els.stage.dataset.rendered === '1'
+}
+
+// Resolves once the page has a painted canvas and a built text layer. Used by
+// find-in-document, which has to scroll to a span that may not exist yet.
+export function waitForPage(uiIdx: number, timeoutMs = 3000): Promise<void> {
+  if (isPageRendered(uiIdx)) return Promise.resolve()
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    function done() {
+      window.removeEventListener('pdf:page-rendered', onRendered)
+      if (timer) clearTimeout(timer)
+      resolve()
+    }
+    function onRendered(e: Event) {
+      const detail = (e as CustomEvent<{ uiIdx: number }>).detail
+      if (detail?.uiIdx === uiIdx) done()
+    }
+    window.addEventListener('pdf:page-rendered', onRendered)
+    timer = setTimeout(done, timeoutMs)
+  })
+}
+
+export async function renderPage(els: PageEls, opts: RenderPageOpts): Promise<void> {
+  const st = stateFor(els.stage)
+  const page = await loadPage(opts.origIdx)
+  if (!page) return
+  const pdfPage = page as unknown as PdfPageLike
+
+  const viewport = pdfPage.getViewport({ scale: opts.scale, rotation: opts.rotation })
+  const dpr = effectiveDpr(viewport.width, viewport.height)
+  const key = renderKey(opts, dpr)
+  if (st.canvasKey === key && st.textKey === key) return
+
+  const token = ++st.token
+  sizePageEls(els, viewport.width, viewport.height)
+
+  if (st.canvasKey !== key) {
+    await paintCanvas(els, pdfPage, viewport, st, token)
+    if (token !== st.token) return
+    st.canvasKey = key
   }
 
-  const viewport = page.getViewport({ scale, rotation })
-  const dpr = window.devicePixelRatio || 1
+  if (st.textKey !== key) {
+    await renderTextLayer(els, pdfPage, viewport, opts, st, token)
+    if (token !== st.token) return
+    st.textKey = key
+  }
+
+  els.stage.dataset.rendered = '1'
+  // Notify composables that listen (text overlay redraw, search highlights)
+  // without forcing them to import this module.
+  window.dispatchEvent(
+    new CustomEvent('pdf:page-rendered', {
+      detail: { uiIdx: els.uiIdx, origIdx: opts.origIdx, scale: opts.scale },
+    }),
+  )
+}
+
+async function paintCanvas(
+  els: PageEls,
+  page: PdfPageLike,
+  viewport: ViewportLike,
+  st: PageRenderState,
+  token: number,
+): Promise<void> {
+  const dpr = effectiveDpr(viewport.width, viewport.height)
+  const canvas = els.canvas
   canvas.width = Math.floor(viewport.width * dpr)
   canvas.height = Math.floor(viewport.height * dpr)
-  canvas.style.width = `${viewport.width}px`
-  canvas.style.height = `${viewport.height}px`
-
-  stage.style.width = `${viewport.width}px`
-  stage.style.height = `${viewport.height}px`
-
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-  if (activeRenderTask) {
+  if (st.task) {
     try {
-      activeRenderTask.cancel()
+      st.task.cancel()
     } catch {
       /* ignore */
     }
   }
-  activeRenderTask = page.render({ canvasContext: ctx, viewport })
+  const task = page.render({ canvasContext: ctx, viewport })
+  st.task = task
   try {
-    await activeRenderTask.promise
+    await task.promise
   } catch {
-    /* cancelled */
+    /* cancelled or superseded */
   }
-  // A newer render owns activeRenderTask by now — don't clear its handle.
-  if (token !== renderToken) return
-  activeRenderTask = null
-
-  pdf.baseViewport = { width: baseViewport.width, height: baseViewport.height }
-  pdf.renderedZoom = scale
-  refs.zoomLabel.value = `${Math.round(pdf.zoom * 100)}%`
-
-  await renderTextLayer(page, origIdx, viewport, scale, token)
-  if (token !== renderToken) return
-
-  // Right page (double-page view). Hidden if there's no next page or we're in
-  // single-page mode. Rendered after the left page so layout is stable when
-  // overlays / search highlights re-position from the page-rendered event.
-  await renderRightPage(rightPageInfo, scale)
-  if (token !== renderToken) return
-
-  // Notify composables that listen (text overlay redraw, active-thumb highlight, etc.)
-  // without forcing them to import this module.
-  window.dispatchEvent(
-    new CustomEvent('pdf:page-rendered', { detail: { viewport, scale } }),
-  )
+  // A newer render for this same page owns st.task by now — don't clear its handle.
+  if (token === st.token) st.task = null
 }
 
-interface RightPageInfo {
-  page: PdfPageLike
-  rotation: number
-  baseViewport: { width: number; height: number }
-}
-
-async function loadRightPage(): Promise<RightPageInfo | null> {
-  const pdf = usePdfStore()
-  if (pdf.viewMode !== 'double') return null
-  const rightUiIdx = pdf.currentPage + 1
-  if (rightUiIdx >= pdf.pageOrder.length) return null
-  const origIdx = pdf.pageOrder[rightUiIdx]
-  const rotation = pdf.rotationFor(origIdx)
-  const page = (await pdf.pdfjsDoc!.getPage(origIdx + 1)) as PdfPageLike
-  const vp = page.getViewport({ scale: 1, rotation })
-  return { page, rotation, baseViewport: { width: vp.width, height: vp.height } }
-}
-
-async function renderRightPage(info: RightPageInfo | null, scale: number): Promise<void> {
-  const refs = useEditorRefs()
-  const stage2 = refs.canvasStage2.value
-  const canvas2 = refs.pdfCanvas2.value
-  if (!stage2 || !canvas2) return
-
-  if (!info) {
-    stage2.style.display = 'none'
-    return
-  }
-
-  stage2.style.display = ''
-  const viewport = info.page.getViewport({ scale, rotation: info.rotation })
-  const dpr = window.devicePixelRatio || 1
-  canvas2.width = Math.floor(viewport.width * dpr)
-  canvas2.height = Math.floor(viewport.height * dpr)
-  canvas2.style.width = `${viewport.width}px`
-  canvas2.style.height = `${viewport.height}px`
-  stage2.style.width = `${viewport.width}px`
-  stage2.style.height = `${viewport.height}px`
-
-  const ctx = canvas2.getContext('2d')
-  if (!ctx) return
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-
-  if (activeRightRenderTask) {
+// Drops a page's pixels when it scrolls far enough out of view. Setting the
+// canvas dimensions to zero is what actually frees the backing store; leaving the
+// element in place keeps the flow geometry (and the CSS box) untouched.
+//
+// A page hosting the open inline text editor is never released — the user is
+// looking straight at it, and tearing down the overlay would destroy the
+// uncommitted edit.
+export function releasePage(els: PageEls): void {
+  if (els.textOverlay.querySelector('.inline-text-editor')) return
+  const st = stateFor(els.stage)
+  st.token++
+  if (st.task) {
     try {
-      activeRightRenderTask.cancel()
+      st.task.cancel()
     } catch {
       /* ignore */
     }
+    st.task = null
   }
-  activeRightRenderTask = info.page.render({ canvasContext: ctx, viewport })
-  try {
-    await activeRightRenderTask.promise
-  } catch {
-    /* cancelled */
-  }
-  activeRightRenderTask = null
+  st.canvasKey = null
+  st.textKey = null
+  els.canvas.width = 0
+  els.canvas.height = 0
+  els.textLayer.replaceChildren()
+  els.textOverlay.replaceChildren()
+  delete els.stage.dataset.rendered
 }
 
 // ---------------------------------------------------------------------------
@@ -323,29 +346,21 @@ function layoutRun(
   if (transforms.length > 0) span.style.transform = transforms.join(' ')
 }
 
-// Which page the spans sitting in the layer right now were built for. A page flip
-// drops them up front — selecting text from the page you just left is worse than
-// a moment with no text layer — while a re-render of the same page at a new zoom
-// keeps them until the replacements are ready.
-let textLayerFor: { layer: HTMLElement; pageOriginalIdx: number } | null = null
-
 async function renderTextLayer(
+  els: PageEls,
   page: PdfPageLike,
-  pageOriginalIdx: number,
   viewport: ViewportLike,
-  scale: number,
+  opts: RenderPageOpts,
+  st: PageRenderState,
   token: number,
 ): Promise<void> {
-  const refs = useEditorRefs()
-  const layer = refs.textLayer.value
-  if (!layer) return
-
-  if (
-    textLayerFor?.layer !== layer ||
-    textLayerFor.pageOriginalIdx !== pageOriginalIdx
-  ) {
+  const layer = els.textLayer
+  // A page keeps its spans across a zoom change until the replacements are ready
+  // — dropping them up front would make the document briefly unselectable on
+  // every wheel tick. A page whose *content* changed (reorder put a different
+  // original page in this slot) must not keep them, and st.textKey encodes that.
+  if (st.textKey !== null && !st.textKey.startsWith(`${opts.origIdx}:${opts.rotation}:`)) {
     layer.replaceChildren()
-    textLayerFor = null
   }
 
   let items: TextItemLike[]
@@ -356,16 +371,10 @@ async function renderTextLayer(
     styles = textContent.styles ?? {}
   } catch (e) {
     console.warn('Text layer render failed', e)
-    if (token === renderToken) {
-      layer.replaceChildren()
-      textLayerFor = null
-    }
+    if (token === st.token) layer.replaceChildren()
     return
   }
-  if (token !== renderToken || refs.textLayer.value !== layer) return
-
-  layer.style.width = `${viewport.width}px`
-  layer.style.height = `${viewport.height}px`
+  if (token !== st.token) return
 
   const util = (usePdfjs() as unknown as PdfjsUtilLike).Util
   const fragment = document.createDocumentFragment()
@@ -379,7 +388,7 @@ async function renderTextLayer(
   for (const item of items) {
     const span = document.createElement('span')
     fragment.appendChild(span)
-    layoutRun(span, item, styles[item.fontName], viewport.transform, scale, util)
+    layoutRun(span, item, styles[item.fontName], viewport.transform, opts.scale, util)
     // pdf.js flags the run that closes a visual line. The <br> sibling is what
     // makes a multi-line selection copy out as separate lines instead of one
     // glued run; it's positioned absolutely (see the .text-layer br rule) so it
@@ -398,5 +407,4 @@ async function renderTextLayer(
   endOfContent.className = 'end-of-content'
   fragment.appendChild(endOfContent)
   layer.replaceChildren(fragment)
-  textLayerFor = { layer, pageOriginalIdx }
 }

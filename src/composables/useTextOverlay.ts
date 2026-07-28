@@ -1,14 +1,25 @@
-// Text overlay: renders placed text + repeat-text annotations imperatively into the
-// overlay div, plus the inline contenteditable editor and its floating toolbar.
+// Text overlay: renders placed text + repeat-text annotations imperatively into each
+// page's overlay div, plus the inline contenteditable editor and its floating toolbar.
 //
 // Why imperative: each annotation needs precise pixel positioning that scales with
 // pdf.zoom, plus drag-to-move with mouse listeners on document. Wrapping each in a Vue
 // component adds a layer of reactivity churn for no benefit — the legacy DOM approach
 // is the right tool here. We DO source the data from the Pinia store, so the rest of
 // the app stays reactive.
+//
+// The continuous viewer has one overlay per page rather than one for "the current
+// page", so every function here takes the page it is acting on. Only pages that are
+// currently painted get an overlay built; repeat texts are drawn onto each of them.
 
 import { PDF_CONFIG, usePdfStore, type TextAnnotation } from '@/stores/pdf'
 import { useEditorRefs } from '@/composables/useEditorRefs'
+import {
+  pageElsAt,
+  pageElsAtPoint,
+  renderedPageEls,
+  type PageEls,
+} from '@/composables/usePageElements'
+import { pageSize } from '@/composables/usePageMetrics'
 import { toast } from '@/composables/useToast'
 import {
   cssFontFamily,
@@ -40,6 +51,11 @@ interface ActiveEditor {
   sourceEl: HTMLElement | null
   isRepeat: boolean
   sourceArr: TextAnnotation[] | null
+  // The page the editor is anchored to. A new annotation is committed against
+  // this page, not against pdf.currentPage — in a continuous flow the user can
+  // scroll a different page into focus while the editor is still open.
+  uiIdx: number
+  origIdx: number
 }
 
 let activeEditor: ActiveEditor | null = null
@@ -53,63 +69,97 @@ export function isEditorActive(): boolean {
   return !!activeEditor
 }
 
-// Open the inline editor for an annotation that already lives in the store. The
-// caller is responsible for navigating to the correct page first; we look up the
-// rendered placed-text element on the current overlay (so it can be hidden while
-// the editor is active) and invoke openEditor with the right isRepeat flag.
-export function editAnnotation(ann: TextAnnotation, isRepeat: boolean): void {
-  const refs = useEditorRefs()
-  const overlay = refs.textOverlay.value
-  let sourceEl: HTMLElement | null = null
-  if (overlay) {
-    const placed = overlay.querySelectorAll<HTMLDivElement>('.placed-text')
-    for (const el of placed) {
-      if (PLACED_TEXT_ANN.get(el) === ann) {
-        sourceEl = el
-        break
-      }
-    }
-  }
-  openEditor({ ann, isRepeat, isNew: false, sourceEl })
+export function activeEditorPage(): number | null {
+  return activeEditor ? activeEditor.uiIdx : null
 }
 
-export function drawTextOverlays(): void {
-  const refs = useEditorRefs()
-  const overlay = refs.textOverlay.value
-  if (!overlay) return
+// Chromium doesn't dispatch `blur` when a focused element is removed from the
+// DOM, so a page unmounting under an open editor (grid mode, a new document)
+// would strand the singleton on a detached node: isEditorActive() would stay
+// true forever and the wrap's mousedown chain would early-return for good,
+// killing pan, placement and selection until Escape discarded the typing.
+export function commitEditorForPage(uiIdx: number): void {
+  if (activeEditor?.uiIdx === uiIdx) commitEditor()
+}
+
+// Open the inline editor for an annotation that already lives in the store. The
+// caller is responsible for scrolling the page into view first; we look up the
+// rendered placed-text element on that page's overlay (so it can be hidden while
+// the editor is active) and invoke openEditor with the right isRepeat flag.
+export function editAnnotation(ann: TextAnnotation, isRepeat: boolean, uiIdx: number): void {
+  const els = pageElsAt(uiIdx)
+  if (!els) return
+  let sourceEl: HTMLElement | null = null
+  for (const el of els.textOverlay.querySelectorAll<HTMLDivElement>('.placed-text')) {
+    if (PLACED_TEXT_ANN.get(el) === ann) {
+      sourceEl = el
+      break
+    }
+  }
+  openEditor({ ann, isRepeat, isNew: false, sourceEl, els })
+}
+
+// Rebuilds the overlay for one page, or for every painted page when called with
+// no argument. Pages outside the render window have no canvas and no overlay, so
+// skipping them keeps this O(visible pages) rather than O(document).
+export function drawTextOverlays(uiIdx?: number): void {
+  if (uiIdx !== undefined) {
+    const els = pageElsAt(uiIdx)
+    if (els) drawPageOverlay(els)
+    return
+  }
+  const seen = new Set<number>()
+  for (const els of renderedPageEls()) {
+    seen.add(els.uiIdx)
+    drawPageOverlay(els)
+  }
+  // The page holding an open editor is pinned even when it is no longer painted.
+  if (activeEditor && !seen.has(activeEditor.uiIdx)) {
+    const els = pageElsAt(activeEditor.uiIdx)
+    if (els) drawPageOverlay(els)
+  }
+}
+
+function drawPageOverlay(els: PageEls): void {
   const pdf = usePdfStore()
+  const overlay = els.textOverlay
 
   const editorEl = overlay.querySelector<HTMLDivElement>('.inline-text-editor')
   const toolbarEl = overlay.querySelector<HTMLDivElement>('.inline-text-toolbar')
   if (editorEl) editorEl.remove()
   if (toolbarEl) toolbarEl.remove()
-  overlay.innerHTML = ''
+  overlay.replaceChildren()
 
-  const origIdx = pdf.pageOrder[pdf.currentPage]
   const perPage = pdf.textAnnotations
-    .filter((a) => a.pageOriginalIdx === origIdx)
+    .filter((a) => a.pageOriginalIdx === els.origIdx)
     .map((a) => ({ ann: a, repeat: false }))
   const repeats = pdf.repeatTexts.map((a) => ({ ann: a, repeat: true }))
 
   for (const { ann, repeat } of [...perPage, ...repeats]) {
-    if (activeEditor && activeEditor.ann === ann) continue
-    overlay.appendChild(makePlacedTextEl(ann, repeat))
+    // Only the instance on the page being edited is suppressed; a repeat text
+    // stays visible on all the other pages while its twin is open in the editor.
+    if (activeEditor && activeEditor.ann === ann && activeEditor.uiIdx === els.uiIdx) continue
+    overlay.appendChild(makePlacedTextEl(ann, repeat, els))
   }
 
   if (editorEl) overlay.appendChild(editorEl)
   if (toolbarEl) overlay.appendChild(toolbarEl)
-  if (activeEditor) {
-    positionEditor(activeEditor.el, activeEditor.ann)
-    positionToolbar(activeEditor.toolbar, activeEditor.el)
+  if (activeEditor && activeEditor.uiIdx === els.uiIdx) {
+    positionEditor(activeEditor.el, activeEditor.ann, els.origIdx)
+    positionToolbar(activeEditor.toolbar, activeEditor.el, overlay)
   }
 }
 
-function makePlacedTextEl(ann: TextAnnotation, isRepeat: boolean): HTMLDivElement {
+function makePlacedTextEl(
+  ann: TextAnnotation,
+  isRepeat: boolean,
+  els: PageEls,
+): HTMLDivElement {
   const el = document.createElement('div')
   el.className = `placed-text${isRepeat ? ' repeat' : ''}`
   el.textContent = ann.text
   PLACED_TEXT_ANN.set(el, ann)
-  positionPlacedText(el, ann)
+  positionPlacedText(el, ann, els.origIdx)
 
   if (isRepeat) {
     const badge = document.createElement('span')
@@ -134,31 +184,28 @@ function makePlacedTextEl(ann: TextAnnotation, isRepeat: boolean): HTMLDivElemen
   })
   el.appendChild(del)
 
-  el.addEventListener('mousedown', (e) => onTextMouseDown(e, el, ann))
+  el.addEventListener('mousedown', (e) => onTextMouseDown(e, el, ann, els))
   el.addEventListener('dblclick', (e) => {
     e.preventDefault()
     e.stopPropagation()
-    openEditor({ ann, isRepeat, isNew: false, sourceEl: el })
+    openEditor({ ann, isRepeat, isNew: false, sourceEl: el, els })
   })
   return el
 }
 
-// Returns the current page's rotation and unrotated dims, derived from the
-// rendered baseViewport. Defaults to (0, 0, 0) if the doc isn't ready.
-function pageRotationContext(): { rotation: number; uW: number; uH: number } {
+// A page's rotation and unrotated dimensions, from the measured page box.
+function pageGeometry(origIdx: number): { rotation: number; uW: number; uH: number } {
   const pdf = usePdfStore()
-  const origIdx = pdf.pageOrder[pdf.currentPage]
-  const rotation = origIdx !== undefined ? pdf.rotationFor(origIdx) : 0
-  const bv = pdf.baseViewport
-  if (!bv) return { rotation, uW: 0, uH: 0 }
-  const { uW, uH } = unrotatedDims(bv.width, bv.height, rotation)
+  const rotation = pdf.rotationFor(origIdx)
+  const size = pageSize(origIdx, rotation)
+  const { uW, uH } = unrotatedDims(size.width, size.height, rotation)
   return { rotation, uW, uH }
 }
 
-function positionPlacedText(el: HTMLElement, ann: TextAnnotation): void {
+function positionPlacedText(el: HTMLElement, ann: TextAnnotation, origIdx: number): void {
   const pdf = usePdfStore()
   const scale = pdf.zoom
-  const { rotation, uW, uH } = pageRotationContext()
+  const { rotation, uW, uH } = pageGeometry(origIdx)
   const { cx, cy } = forwardTransform(ann.x, ann.y, uW, uH, rotation)
   el.style.left = `${cx * scale}px`
   el.style.top = `${cy * scale}px`
@@ -172,7 +219,22 @@ function positionPlacedText(el: HTMLElement, ann: TextAnnotation): void {
   el.style.transform = rotation ? `rotate(${rotation}deg)` : ''
 }
 
-function onTextMouseDown(e: MouseEvent, el: HTMLDivElement, ann: TextAnnotation): void {
+// Repositions every rendered element that draws this annotation — one per
+// painted page for a repeat text, exactly one otherwise.
+function syncAnnotationEls(ann: TextAnnotation): void {
+  for (const els of renderedPageEls()) {
+    for (const el of els.textOverlay.querySelectorAll<HTMLDivElement>('.placed-text')) {
+      if (PLACED_TEXT_ANN.get(el) === ann) positionPlacedText(el, ann, els.origIdx)
+    }
+  }
+}
+
+function onTextMouseDown(
+  e: MouseEvent,
+  el: HTMLDivElement,
+  ann: TextAnnotation,
+  els: PageEls,
+): void {
   const pdf = usePdfStore()
   if (pdf.pendingTextPlacement) return
   if (activeEditor) return
@@ -186,7 +248,8 @@ function onTextMouseDown(e: MouseEvent, el: HTMLDivElement, ann: TextAnnotation)
   const origX = ann.x
   const origY = ann.y
   const scale = pdf.zoom
-  const { rotation } = pageRotationContext()
+  const { rotation, uW, uH } = pageGeometry(els.origIdx)
+  const isRepeat = pdf.repeatTexts.indexOf(ann) >= 0
   let moved = false
 
   function onMove(ev: MouseEvent) {
@@ -200,9 +263,15 @@ function onTextMouseDown(e: MouseEvent, el: HTMLDivElement, ann: TextAnnotation)
     ) {
       moved = true
     }
-    ann.x = origX + dx
-    ann.y = origY + dy
-    positionPlacedText(el, ann)
+    // Clamped to the page box: the stage clips its overflow, so a text dragged
+    // into the gutter between pages simply vanishes, recoverable only from the
+    // Texts panel.
+    ann.x = Math.max(0, Math.min(uW, origX + dx))
+    ann.y = Math.max(0, Math.min(uH, origY + dy))
+    // A repeat text is drawn on every painted page, so dragging one has to carry
+    // its twins along or they sit frozen until mouseup.
+    if (isRepeat) syncAnnotationEls(ann)
+    else positionPlacedText(el, ann, els.origIdx)
   }
   function onUp() {
     document.removeEventListener('mousemove', onMove)
@@ -218,7 +287,7 @@ function onTextMouseDown(e: MouseEvent, el: HTMLDivElement, ann: TextAnnotation)
     // checking presence in the per-page array is the reliable discriminator.
     const store = usePdfStore()
     const isRepeat = store.repeatTexts.indexOf(ann) >= 0
-    openEditor({ ann, isRepeat, isNew: false, sourceEl: el })
+    openEditor({ ann, isRepeat, isNew: false, sourceEl: el, els })
   }
   document.addEventListener('mousemove', onMove)
   document.addEventListener('mouseup', onUp)
@@ -230,22 +299,20 @@ export function startTextPlacement(): void {
   pdf.pendingTextPlacement = { ...DEFAULT_TEXT_OPTS } as typeof DEFAULT_TEXT_OPTS
   const refs = useEditorRefs()
   refs.canvasWrap.value?.classList.add('placing-text')
-  toast('Click on the page to place text')
+  toast('Click on a page to place text')
 }
 
 export function placePendingTextAt(clientX: number, clientY: number): boolean {
   const pdf = usePdfStore()
   const p = pdf.pendingTextPlacement
   if (!p) return false
-  const refs = useEditorRefs()
-  const canvas = refs.pdfCanvas.value
-  if (!canvas) return false
-  const r = canvas.getBoundingClientRect()
+  const els = pageElsAtPoint(clientX, clientY)
+  if (!els) return false
+  const r = els.canvas.getBoundingClientRect()
   const cxs = clientX - r.left
   const cys = clientY - r.top
-  if (cxs < 0 || cys < 0 || cxs > r.width || cys > r.height) return false
   const scale = pdf.zoom
-  const { rotation, uW, uH } = pageRotationContext()
+  const { rotation, uW, uH } = pageGeometry(els.origIdx)
   const { x, y } = inverseTransform(cxs / scale, cys / scale, uW, uH, rotation)
   const ann: TextAnnotation = {
     x,
@@ -259,8 +326,8 @@ export function placePendingTextAt(clientX: number, clientY: number): boolean {
     underline: !!p.underline,
   }
   pdf.pendingTextPlacement = null
-  refs.canvasWrap.value?.classList.remove('placing-text')
-  openEditor({ ann, isRepeat: !!p.repeat, isNew: true, sourceEl: null })
+  useEditorRefs().canvasWrap.value?.classList.remove('placing-text')
+  openEditor({ ann, isRepeat: !!p.repeat, isNew: true, sourceEl: null, els })
   return true
 }
 
@@ -269,13 +336,12 @@ interface OpenEditorOpts {
   isRepeat: boolean
   isNew: boolean
   sourceEl: HTMLElement | null
+  els: PageEls
 }
 
-function openEditor({ ann, isRepeat, isNew, sourceEl }: OpenEditorOpts): void {
+function openEditor({ ann, isRepeat, isNew, sourceEl, els }: OpenEditorOpts): void {
   if (activeEditor) commitEditor()
-  const refs = useEditorRefs()
-  const overlay = refs.textOverlay.value
-  if (!overlay) return
+  const overlay = els.textOverlay
 
   const el = document.createElement('div')
   el.className = 'inline-text-editor'
@@ -283,11 +349,11 @@ function openEditor({ ann, isRepeat, isNew, sourceEl }: OpenEditorOpts): void {
   el.spellcheck = false
   el.textContent = ann.text || ''
   applyEditorStyle(el, ann)
-  positionEditor(el, ann)
+  positionEditor(el, ann, els.origIdx)
   el.addEventListener('mousedown', (e) => e.stopPropagation())
   el.addEventListener('keydown', onEditorKeydown)
   el.addEventListener('input', () => {
-    if (activeEditor) positionToolbar(activeEditor.toolbar, el)
+    if (activeEditor) positionToolbar(activeEditor.toolbar, el, overlay)
   })
   el.addEventListener('blur', () => {
     setTimeout(() => {
@@ -300,7 +366,7 @@ function openEditor({ ann, isRepeat, isNew, sourceEl }: OpenEditorOpts): void {
   })
   overlay.appendChild(el)
 
-  const tb = buildToolbar(ann, isRepeat)
+  const tb = buildToolbar(ann, isRepeat, overlay)
   overlay.appendChild(tb)
 
   const pdf = usePdfStore()
@@ -312,10 +378,12 @@ function openEditor({ ann, isRepeat, isNew, sourceEl }: OpenEditorOpts): void {
     sourceEl,
     isRepeat,
     sourceArr: isNew ? null : isRepeat ? pdf.repeatTexts : pdf.textAnnotations,
+    uiIdx: els.uiIdx,
+    origIdx: els.origIdx,
   }
   if (sourceEl) sourceEl.style.visibility = 'hidden'
 
-  positionToolbar(tb, el)
+  positionToolbar(tb, el, overlay)
   el.focus()
   // Place caret at end
   const range = document.createRange()
@@ -326,10 +394,10 @@ function openEditor({ ann, isRepeat, isNew, sourceEl }: OpenEditorOpts): void {
   sel?.addRange(range)
 }
 
-function positionEditor(el: HTMLElement, ann: TextAnnotation): void {
+function positionEditor(el: HTMLElement, ann: TextAnnotation, origIdx: number): void {
   const pdf = usePdfStore()
   const scale = pdf.zoom
-  const { rotation, uW, uH } = pageRotationContext()
+  const { rotation, uW, uH } = pageGeometry(origIdx)
   const { cx, cy } = forwardTransform(ann.x, ann.y, uW, uH, rotation)
   el.style.left = `${cx * scale}px`
   el.style.top = `${cy * scale}px`
@@ -346,7 +414,11 @@ function applyEditorStyle(el: HTMLElement, ann: TextAnnotation): void {
   el.style.textDecoration = ann.underline ? 'underline' : 'none'
 }
 
-function buildToolbar(ann: TextAnnotation, isRepeat: boolean): HTMLDivElement {
+function buildToolbar(
+  ann: TextAnnotation,
+  isRepeat: boolean,
+  overlay: HTMLElement,
+): HTMLDivElement {
   const tb = document.createElement('div')
   tb.className = 'inline-text-toolbar'
   tb.addEventListener('mousedown', (e) => {
@@ -381,7 +453,7 @@ function buildToolbar(ann: TextAnnotation, isRepeat: boolean): HTMLDivElement {
     const v = Math.max(6, Math.min(200, parseInt(sizeInput.value, 10) || 14))
     activeEditor.ann.size = v
     activeEditor.el.style.fontSize = `${v * usePdfStore().zoom}px`
-    positionToolbar(activeEditor.toolbar, activeEditor.el)
+    positionToolbar(activeEditor.toolbar, activeEditor.el, overlay)
   })
 
   const colorInput = document.createElement('input')
@@ -468,10 +540,7 @@ function buildToolbar(ann: TextAnnotation, isRepeat: boolean): HTMLDivElement {
   return tb
 }
 
-function positionToolbar(tb: HTMLElement, editorEl: HTMLElement): void {
-  const refs = useEditorRefs()
-  const overlay = refs.textOverlay.value
-  if (!overlay) return
+function positionToolbar(tb: HTMLElement, editorEl: HTMLElement, overlay: HTMLElement): void {
   const ow = overlay.clientWidth
   const editorTop = parseFloat(editorEl.style.top) || 0
   const editorLeft = parseFloat(editorEl.style.left) || 0
@@ -522,7 +591,7 @@ function onEditorKeydown(e: KeyboardEvent): void {
 
 export function commitEditor(): void {
   if (!activeEditor) return
-  const { el, toolbar, ann, isNew, sourceArr, isRepeat } = activeEditor
+  const { el, toolbar, ann, isNew, sourceArr, isRepeat, origIdx } = activeEditor
   const text = (el.innerText || '').replace(/\s+$/g, '').trim()
   el.remove()
   toolbar.remove()
@@ -545,7 +614,7 @@ export function commitEditor(): void {
       delete (ann as { pageOriginalIdx?: number }).pageOriginalIdx
       pdf.addRepeatText(ann)
     } else {
-      ann.pageOriginalIdx = pdf.pageOrder[pdf.currentPage]
+      ann.pageOriginalIdx = origIdx
       pdf.addTextAnnotation(ann)
     }
     toast('Text added — drag to move, double-click to edit', 'success')
@@ -559,7 +628,7 @@ export function commitEditor(): void {
         delete (ann as { pageOriginalIdx?: number }).pageOriginalIdx
         pdf.addRepeatText(ann)
       } else {
-        ann.pageOriginalIdx = pdf.pageOrder[pdf.currentPage]
+        ann.pageOriginalIdx = origIdx
         pdf.addTextAnnotation(ann)
       }
     }

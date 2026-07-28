@@ -12,6 +12,8 @@
 import { computed, ref, watch } from 'vue'
 import { usePdfStore } from '@/stores/pdf'
 import { useEditorRefs } from '@/composables/useEditorRefs'
+import { pageElsAt, renderedPageEls } from '@/composables/usePageElements'
+import { waitForPage } from '@/composables/usePdfRenderer'
 import { gotoPage } from '@/composables/usePageActions'
 
 interface PageTextIndex {
@@ -66,11 +68,15 @@ async function getPageIndex(pageOriginalIdx: number): Promise<PageTextIndex> {
   const boundaries: number[] = [0]
   let joined = ''
   for (const it of tc.items) {
-    const s = it.str ?? ''
+    // Lower-cased per item, before the offsets are recorded. Lower-casing the
+    // joined string afterwards can change its length — 'İ'.toLowerCase() is two
+    // code units — which shifts every later boundary and lands the highlight on
+    // the neighbouring span.
+    const s = (it.str ?? '').toLowerCase()
     joined += s + ' '
     boundaries.push(joined.length)
   }
-  const result: PageTextIndex = { joinedText: joined.toLowerCase(), itemBoundaries: boundaries }
+  const result: PageTextIndex = { joinedText: joined, itemBoundaries: boundaries }
   cache.set(pageOriginalIdx, result)
   return result
 }
@@ -114,22 +120,23 @@ export async function runSearch(q: string): Promise<void> {
   if (currentMatchIdx.value >= 0) await scrollToCurrentMatch()
 }
 
+// Repaints highlights across every painted page. Matches on pages outside the
+// render window have no spans to mark yet; they get marked when that page paints,
+// because the page-rendered handler calls back in here.
 export function applyHighlights(): void {
-  const refs = useEditorRefs()
-  const layer = refs.textLayer.value
-  if (!layer) return
-  const spans = layer.querySelectorAll<HTMLSpanElement>(':scope > span')
-  spans.forEach((s) => s.classList.remove('search-hit', 'search-current'))
-  if (matches.value.length === 0) return
-  const pdf = usePdfStore()
-  const origIdx = pdf.pageOrder[pdf.currentPage]
-  for (let m = 0; m < matches.value.length; m++) {
-    const match = matches.value[m]
-    if (match.pageOriginalIdx !== origIdx) continue
-    const cls = m === currentMatchIdx.value ? 'search-current' : 'search-hit'
-    for (const i of match.itemIndices) {
-      const span = spans[i]
-      if (span) span.classList.add(cls)
+  for (const els of renderedPageEls()) {
+    const spans = els.textLayer.querySelectorAll<HTMLSpanElement>(':scope > span')
+    if (spans.length === 0) continue
+    spans.forEach((s) => s.classList.remove('search-hit', 'search-current'))
+    if (matches.value.length === 0) continue
+    for (let m = 0; m < matches.value.length; m++) {
+      const match = matches.value[m]
+      if (match.pageOriginalIdx !== els.origIdx) continue
+      const cls = m === currentMatchIdx.value ? 'search-current' : 'search-hit'
+      for (const i of match.itemIndices) {
+        const span = spans[i]
+        if (span) span.classList.add(cls)
+      }
     }
   }
 }
@@ -140,15 +147,17 @@ async function scrollToCurrentMatch(): Promise<void> {
   const pdf = usePdfStore()
   const ui = pdf.pageOrder.indexOf(m.pageOriginalIdx)
   if (ui < 0) return
-  if (ui !== pdf.currentPage) {
-    await gotoPage(ui)
-  }
+  // Instant for the coarse jump: Chromium scales a smooth scroll's duration with
+  // distance, so jumping from page 1 to page 300 smoothly would still be in
+  // flight when the measured correction below starts and the two would fight.
+  await gotoPage(ui, 'auto')
+  // The hit's span only exists once that page has actually been painted.
+  await waitForPage(ui)
   applyHighlights()
-  const refs = useEditorRefs()
-  const layer = refs.textLayer.value
-  const wrap = refs.canvasWrap.value
-  if (!layer || !wrap) return
-  const spans = layer.querySelectorAll<HTMLSpanElement>(':scope > span')
+  const els = pageElsAt(ui)
+  const wrap = useEditorRefs().canvasWrap.value
+  if (!els || !wrap) return
+  const spans = els.textLayer.querySelectorAll<HTMLSpanElement>(':scope > span')
   const span = spans[m.itemIndices[0]]
   if (!span) return
   const sr = span.getBoundingClientRect()

@@ -1,5 +1,5 @@
-// Cuts a new release: bumps version, builds, publishes artifacts to GitHub,
-// then tags + pushes.
+// Cuts a new release: bumps version, tags + pushes, then builds and publishes
+// artifacts to GitHub.
 //
 // Auth (in priority order):
 //   1. $env:GH_TOKEN / $env:GITHUB_TOKEN if set
@@ -12,10 +12,10 @@
 //   npm run release -- major   # major bump
 //   npm run release -- 1.2.3   # explicit version
 //
-// electron-builder reads GH_TOKEN from the environment and creates a DRAFT
-// release containing OloPDF-Setup-<version>.exe + OloPDF-Portable-<version>.exe
-// + latest.yml. Once you publish the draft on GitHub, NSIS-installed clients
-// pick up the update automatically via electron-updater.
+// electron-builder reads GH_TOKEN from the environment and creates a PUBLISHED
+// release (build.publish.releaseType = "release" in package.json) containing
+// OloPDF-Setup-<version>.exe + OloPDF-Portable-<version>.exe + latest.yml.
+// NSIS-installed clients pick it up immediately via electron-updater.
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -107,14 +107,18 @@ run('git', ['add', 'package.json', 'package-lock.json'])
 run('git', ['commit', '-m', `chore(release): v${version}`])
 run('git', ['tag', '-a', `v${version}`, '-m', `OloPDF v${version}`])
 
+// Push BEFORE publishing: when electron-builder creates the GitHub release and
+// the tag doesn't exist remotely yet, GitHub creates it on the remote's current
+// main — the previous release commit — and a later push doesn't move it. That
+// left v1.0.8–v1.0.14 tagged one release behind.
+console.log('[release] pushing commit + tag…')
+run('git', ['push', '--atomic', 'origin', 'main', `v${version}`])
+
 console.log('[release] building renderer…')
 run('npm', ['run', 'build:renderer'])
 
 console.log('[release] building installer + portable, publishing to GitHub…')
 run('npx', ['electron-builder', '--win', '--publish', 'always'])
 
-console.log('[release] pushing commit + tag…')
-run('git', ['push', '--follow-tags'])
-
-console.log(`\n[release] Done. v${version} draft release uploaded to GitHub.`)
-console.log('[release] Visit https://github.com/lsparagino/olopdf/releases — review and publish the draft to roll out auto-updates.')
+console.log(`\n[release] Done. v${version} published to GitHub — auto-updates roll out now.`)
+console.log(`[release] https://github.com/lsparagino/olopdf/releases/tag/v${version}`)

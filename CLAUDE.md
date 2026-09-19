@@ -63,7 +63,8 @@ src/
 ├── composables/              # useToast, useLoading, useRecents, useOpenPdf, usePdfEngine, useChromeZoomDefense
 └── utils/
     ├── electron.ts           # window.require wrappers for ipcRenderer/shell/fs/path
-    └── pdf.ts                # hexToRgb01, cssFontFamily, pickStandardFont, formatBytes
+    ├── pdf.ts                # hexToRgb01, cssFontFamily, pickStandardFont, formatBytes
+    └── pdfEncryption.ts      # loadPdfDocument: decrypts Standard-handler PDFs (RC4/AES, R2–R6) before pdf-lib edits them
 ```
 
 ## Architecture
@@ -85,7 +86,7 @@ Prefer the store for shared state, composables for shared behavior, events only 
 ### Two PDF libraries, two purposes
 
 - **pdf.js (`pdfjs-dist/legacy/build/pdf.js`)** — rendering only (canvas + text extraction). Wrapped by `composables/usePdfEngine.ts`. Worker is loaded by reading `pdf.worker.js` from `node_modules` with `fs.readFileSync` and wrapping it as a `Blob` URL — this works in dev (Vite externalizes both `fs` and `pdfjs-dist`, so `require.resolve` runs against Node's resolver) and in the packaged asar. Don't replace it with a path-based `workerSrc`; that breaks under asar.
-- **pdf-lib** — all editing (page reordering/deletion, merging, drawing text, building the outline). Used only at save time, never during preview.
+- **pdf-lib** — all editing (page reordering/deletion, merging, drawing text, building the outline). Used only at save time, never during preview. Load user-supplied bytes with `loadPdfDocument()` from `utils/pdfEncryption.ts`, never `PDFDocument.load()` directly: pdf-lib can't decrypt, and owner-locked PDFs (empty user password) are common. Its `ignoreEncryption` option is not a fix — copied pages come out blank. Password-protected files throw `PdfPasswordError`.
 
 Both libraries are loaded with `window.require(...)` at runtime — never imported. The bundler sees nothing to resolve, so they stay out of the asar bundle and load straight from `node_modules` via Electron's Node integration. Don't add them to `rollupOptions.external` — that combination forced `format: 'cjs'` historically and crashed the renderer in production with `exports is not defined`.
 

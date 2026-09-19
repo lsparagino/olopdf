@@ -6,6 +6,7 @@ import { hideLoading, showLoading } from '@/composables/useLoading'
 import { toast } from '@/composables/useToast'
 import { hexToRgb01, pickStandardFont } from '@/utils/pdf'
 import { fileExists, ipcInvoke, nodePath, writeFileBytes } from '@/utils/electron'
+import { loadPdfDocument } from '@/utils/pdfEncryption'
 
 const pdfLib = (window as unknown as { require: (m: string) => typeof import('pdf-lib') }).require(
   'pdf-lib',
@@ -38,7 +39,7 @@ export async function savePdf(): Promise<void> {
     if (r.canceled || !r.filePath) return
 
     showLoading('Saving PDF...')
-    const srcDoc = await PDFDocument.load(pdf.pdfBytes)
+    const srcDoc = await loadPdfDocument(pdf.pdfBytes)
     const newDoc = await PDFDocument.create()
 
     type StandardFontName = ReturnType<typeof pickStandardFont>

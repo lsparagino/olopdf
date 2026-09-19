@@ -18,6 +18,7 @@
 
 import { ref } from 'vue'
 import { usePdfjs } from '@/composables/usePdfEngine'
+import { loadPdfDocument } from '@/utils/pdfEncryption'
 
 const pdfLib = (window as unknown as { require: (m: string) => typeof import('pdf-lib') }).require(
   'pdf-lib',
@@ -344,7 +345,7 @@ async function imageRecompress(
   preset: PresetSettings,
   onProgress: (p: CompressProgress) => void,
 ): Promise<{ bytes: Uint8Array; metadataStripped: boolean } & ImageRecompressStats> {
-  const doc = await PDFDocument.load(srcBytes.slice(0))
+  const doc = await loadPdfDocument(srcBytes.slice(0))
   const ctx = doc.context
 
   // Find every DCTDecode-filtered image XObject. JBIG2 / JPEG2000 / Flate

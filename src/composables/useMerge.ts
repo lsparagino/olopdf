@@ -4,6 +4,7 @@ import { usePdfStore, type MergeFile } from '@/stores/pdf'
 import { hideLoading, showLoading } from '@/composables/useLoading'
 import { toast } from '@/composables/useToast'
 import { ipcInvoke, nodePath, readFileAsArrayBuffer, writeFileBytes } from '@/utils/electron'
+import { loadPdfDocument } from '@/utils/pdfEncryption'
 
 const pdfLib = (window as unknown as { require: (m: string) => typeof import('pdf-lib') }).require(
   'pdf-lib',
@@ -61,6 +62,7 @@ export function moveMergeItem(src: number, dest: number): void {
 export async function performMerge(): Promise<void> {
   const pdf = usePdfStore()
   if (pdf.mergeFiles.length < 2) return
+  let current: string | null = null
   try {
     const r = await ipcInvoke<SaveDialogResult>('dialog:save', {
       defaultPath: 'merged.pdf',
@@ -70,10 +72,12 @@ export async function performMerge(): Promise<void> {
     showLoading('Merging PDFs...')
     const out = await PDFDocument.create()
     for (const f of pdf.mergeFiles) {
-      const src = await PDFDocument.load(f.bytes)
+      current = f.name
+      const src = await loadPdfDocument(f.bytes)
       const pages = await out.copyPages(src, src.getPageIndices())
       pages.forEach((p) => out.addPage(p))
     }
+    current = null
     const bytes = await out.save()
     await writeFileBytes(r.filePath, bytes)
     hideLoading()
@@ -82,6 +86,6 @@ export async function performMerge(): Promise<void> {
     console.error(err)
     hideLoading()
     const msg = err instanceof Error ? err.message : String(err)
-    toast(`Merge failed: ${msg}`, 'error')
+    toast(current ? `Merge failed on ${current}: ${msg}` : `Merge failed: ${msg}`, 'error')
   }
 }

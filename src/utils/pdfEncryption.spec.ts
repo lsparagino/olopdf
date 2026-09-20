@@ -97,12 +97,14 @@ describe('decryptPdf', () => {
 
 describe('loadPdfDocument', () => {
   it('loads unencrypted files unchanged', async () => {
-    const doc = await mod.loadPdfDocument(fixture('plain.pdf').buffer as ArrayBuffer)
+    const { doc, decrypted } = await mod.loadPdfDocument(fixture('plain.pdf').buffer as ArrayBuffer)
+    expect(decrypted).toBe(false)
     expect(doc.getPageCount()).toBe(2)
   })
 
   it('decrypts owner-locked files instead of throwing', async () => {
-    const doc = await mod.loadPdfDocument(fixture('mupdf-aes-128-objstm.pdf'))
+    const { doc, decrypted } = await mod.loadPdfDocument(fixture('mupdf-aes-128-objstm.pdf'))
+    expect(decrypted).toBe(true)
     expect(doc.isEncrypted).toBe(false)
     expect(doc.getPageCount()).toBe(2)
   })

@@ -3,6 +3,7 @@ import { router } from '@/router'
 import { ipcInvoke, nodePath, readFileAsArrayBuffer } from '@/utils/electron'
 import { hideLoading, showLoading } from '@/composables/useLoading'
 import { toast } from '@/composables/useToast'
+import { describeError } from '@/utils/errors'
 import { addRecent } from '@/composables/useRecents'
 import { type Bookmark, usePdfStore } from '@/stores/pdf'
 import { usePdfjs } from '@/composables/usePdfEngine'
@@ -41,8 +42,8 @@ export async function openPdfFromPath(filePath: string): Promise<void> {
     await addRecent(filePath)
   } catch (err) {
     console.error(err)
-    const msg = err instanceof Error ? err.message : String(err)
-    toast(`Failed to open PDF: ${msg}`, 'error')
+    const msg = describeError(err)
+    toast(`Failed to open PDF: ${msg}`, 'error', { sticky: true })
   } finally {
     hideLoading()
   }

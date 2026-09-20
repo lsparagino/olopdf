@@ -5,13 +5,11 @@ import UiButton from '@/components/ui/UiButton.vue'
 import WelcomeRecents from '@/components/features/welcome/WelcomeRecents.vue'
 import CuratorPill from '@/components/features/welcome/CuratorPill.vue'
 import { pickAndOpenPdf, openPdfFromPath } from '@/composables/useOpenPdf'
-import { usePdfStore } from '@/stores/pdf'
-import { readFileAsArrayBuffer } from '@/utils/electron'
+import { addMergeFiles, keepPdfFiles, resetMergeFiles } from '@/composables/useMerge'
 
 defineOptions({ name: 'WelcomePage' })
 
 const router = useRouter()
-const pdf = usePdfStore()
 const dragover = ref(false)
 
 interface FileWithPath extends File {
@@ -22,23 +20,19 @@ async function onDrop(e: DragEvent) {
   e.preventDefault()
   dragover.value = false
   if (!e.dataTransfer) return
-  const files = Array.from(e.dataTransfer.files).filter((f) =>
-    f.name.toLowerCase().endsWith('.pdf'),
-  ) as FileWithPath[]
+  const files = keepPdfFiles(Array.from(e.dataTransfer.files) as FileWithPath[])
   if (files.length === 0) return
   if (files.length === 1) {
     await openPdfFromPath(files[0].path)
     return
   }
-  pdf.mergeFiles = []
-  for (const f of files) {
-    pdf.mergeFiles.push({ name: f.name, bytes: await readFileAsArrayBuffer(f.path) })
-  }
+  resetMergeFiles()
+  await addMergeFiles(files.map((f) => ({ name: f.name, path: f.path })))
   await router.push({ name: 'merge' })
 }
 
 function onMerge() {
-  pdf.mergeFiles = []
+  resetMergeFiles()
   void router.push({ name: 'merge' })
 }
 

@@ -14,6 +14,9 @@ import type {
   PDFRef as PdfRef,
 } from 'pdf-lib'
 
+import { repairPageTree } from '@/utils/pdfPageTree'
+import { loadDamagedPdf } from '@/utils/pdfRepair'
+
 const pdfLib = (window as unknown as { require: (m: string) => typeof import('pdf-lib') }).require(
   'pdf-lib',
 )
@@ -79,13 +82,32 @@ export class PdfPasswordError extends Error {
   }
 }
 
-export async function loadPdfDocument(bytes: ArrayBuffer | Uint8Array): Promise<PdfDocument> {
+export interface LoadedPdf {
+  doc: PdfDocument
+  // True when the file was encrypted and had to be decrypted to load.
+  decrypted: boolean
+  // True when the file was damaged and had to be rebuilt to reach its pages.
+  repaired: boolean
+}
+
+export async function loadPdfDocument(bytes: ArrayBuffer | Uint8Array): Promise<LoadedPdf> {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  let doc: PdfDocument
+  try {
+    doc = await PDFDocument.load(bytes, { ignoreEncryption: true })
+  } catch (err) {
+    // Repair only what pdf-lib has already rejected, so every file that loads
+    // today still loads exactly as before; when repair fails too, pdf-lib's
+    // own error is the more useful one to show.
+    const repairedDoc = await loadDamagedPdf(view)
+    if (!repairedDoc) throw err
+    return { doc: repairedDoc, decrypted: false, repaired: true }
+  }
   // Checking isEncrypted rather than catching EncryptedPDFError: pdf-lib ships
   // as ES5, where Error subclasses lose their prototype and instanceof fails.
-  const doc = await PDFDocument.load(bytes, { ignoreEncryption: true })
-  if (!doc.isEncrypted) return doc
-  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
-  return PDFDocument.load(await decryptPdf(view))
+  if (!doc.isEncrypted) return { doc, decrypted: false, repaired: repairPageTree(doc) }
+  const decryptedDoc = await PDFDocument.load(await decryptPdf(view))
+  return { doc: decryptedDoc, decrypted: true, repaired: repairPageTree(decryptedDoc) }
 }
 
 export async function decryptPdf(bytes: Uint8Array, password = ''): Promise<Uint8Array> {
@@ -110,7 +132,12 @@ async function readSecurityHandler(bytes: Uint8Array, password: string): Promise
 
   const encryptEntry = context.trailerInfo.Encrypt
   const encrypt = context.lookup(encryptEntry)
-  if (!(encrypt instanceof PDFDict)) throw new Error('missing encryption dictionary')
+  // The trailer points at an /Encrypt object pdf-lib couldn't read as a dict.
+  // Its streams are still ciphertext, so there is nothing to salvage — reference
+  // readers open such files but render blank pages.
+  if (!(encrypt instanceof PDFDict)) {
+    throw new Error('the file is encrypted and its encryption settings are damaged')
+  }
   const filter = encrypt.get(PDFName.of('Filter'))
   if (filter !== PDFName.of('Standard')) {
     throw new Error(`unsupported encryption (${String(filter)}); only password encryption can be removed`)

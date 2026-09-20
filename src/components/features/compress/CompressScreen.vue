@@ -16,6 +16,7 @@ import {
   type CompressStrategy,
 } from '@/composables/useCompress'
 import { toast } from '@/composables/useToast'
+import { describeError } from '@/utils/errors'
 import {
   ipcInvoke,
   nodePath,
@@ -233,8 +234,8 @@ async function onCompress() {
       toast('Cancelled')
     } else {
       console.error(err)
-      const msg = err instanceof Error ? err.message : String(err)
-      toast(`Compression failed: ${msg}`, 'error')
+      const msg = describeError(err)
+      toast(`Compression failed: ${msg}`, 'error', { sticky: true })
     }
   } finally {
     running.value = false
@@ -263,8 +264,8 @@ async function onSaveResult() {
     toast('Saved', 'success')
   } catch (err) {
     console.error(err)
-    const msg = err instanceof Error ? err.message : String(err)
-    toast(`Save failed: ${msg}`, 'error')
+    const msg = describeError(err)
+    toast(`Save failed: ${msg}`, 'error', { sticky: true })
   }
 }
 </script>

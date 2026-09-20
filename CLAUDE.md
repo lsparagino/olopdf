@@ -64,7 +64,10 @@ src/
 └── utils/
     ├── electron.ts           # window.require wrappers for ipcRenderer/shell/fs/path
     ├── pdf.ts                # hexToRgb01, cssFontFamily, pickStandardFont, formatBytes
-    └── pdfEncryption.ts      # loadPdfDocument: decrypts Standard-handler PDFs (RC4/AES, R2–R6) before pdf-lib edits them
+    ├── errors.ts             # describeError: turns fs/IPC/pdf-lib errors into something a user can act on
+    ├── pdfEncryption.ts      # loadPdfDocument: the one entry point for reading a user's PDF (decrypt + repair)
+    ├── pdfPageTree.ts        # repairPageTree: rebuilds a page tree pdf-lib can't walk (bad /Type, cycles, stray /Parent)
+    └── pdfRepair.ts          # loadDamagedPdf: second-chance parse for files pdf-lib rejects (bad header/xref/trailer)
 ```
 
 ## Architecture
@@ -87,6 +90,20 @@ Prefer the store for shared state, composables for shared behavior, events only 
 
 - **pdf.js (`pdfjs-dist/legacy/build/pdf.js`)** — rendering only (canvas + text extraction). Wrapped by `composables/usePdfEngine.ts`. Worker is loaded by reading `pdf.worker.js` from `node_modules` with `fs.readFileSync` and wrapping it as a `Blob` URL — this works in dev (Vite externalizes both `fs` and `pdfjs-dist`, so `require.resolve` runs against Node's resolver) and in the packaged asar. Don't replace it with a path-based `workerSrc`; that breaks under asar.
 - **pdf-lib** — all editing (page reordering/deletion, merging, drawing text, building the outline). Used only at save time, never during preview. Load user-supplied bytes with `loadPdfDocument()` from `utils/pdfEncryption.ts`, never `PDFDocument.load()` directly: pdf-lib can't decrypt, and owner-locked PDFs (empty user password) are common. Its `ignoreEncryption` option is not a fix — copied pages come out blank. Password-protected files throw `PdfPasswordError`.
+
+### `loadPdfDocument` is the only way in
+
+pdf-lib is stricter than pdf.js, so files the viewer renders can still be unreadable to it. `loadPdfDocument` closes that gap in three steps and reports what it had to do (`{ doc, decrypted, repaired }`):
+
+1. `PDFDocument.load(…, { ignoreEncryption: true })`. On failure only, `loadDamagedPdf()` (`utils/pdfRepair.ts`) re-parses, stepping over a damaged header/xref/trailer and completing the page tree the way pdf.js reads it. It refuses encrypted files, so pages can never be copied as ciphertext.
+2. Encrypted → `decryptPdf()`.
+3. `repairPageTree()` (`utils/pdfPageTree.ts`) runs on the loaded document. Its gate mirrors the lookups pdf-lib's `getPages()`/`copyPages()` make and is a strict no-op on well-formed files (verified over the pdf.js corpus); it only rebuilds when pdf-lib would crash or silently drop pages. It must run **before** anything calls `getPages()`/`getPageCount()`, which pdf-lib caches.
+
+Both repairs wrap private pdf-lib members (guarded by `typeof` checks) because pdf-lib 1.17.1 exposes no hooks; it is frozen, and their specs fail loudly if that changes. Verify any change here against the pdf.js test corpus (`test/pdfs`, ~982 files), comparing merged output hashes before and after — not just the files you meant to fix.
+
+### The merge screen checks files up front
+
+Every file added to the merge list is run through the real merge steps (load → `copyPages` → `save`) on its own, and the row shows the page count, an "Unlocked"/"Repaired" badge, or the reason it can't be merged. A merge only fails as a whole for reasons no single file explains (e.g. the output file being locked). Keep new failure paths attributable to a file: "no indication which file" is the bug this replaced.
 
 Both libraries are loaded with `window.require(...)` at runtime — never imported. The bundler sees nothing to resolve, so they stay out of the asar bundle and load straight from `node_modules` via Electron's Node integration. Don't add them to `rollupOptions.external` — that combination forced `format: 'cjs'` historically and crashed the renderer in production with `exports is not defined`.
 

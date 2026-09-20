@@ -27,9 +27,19 @@ export interface Bookmark {
   level: number
 }
 
+export type MergeFileStatus = 'checking' | 'ready' | 'error'
+
 export interface MergeFile {
+  id: number
   name: string
   bytes: ArrayBuffer
+  status: MergeFileStatus
+  pageCount?: number
+  // Was encrypted with an owner password and had its restrictions removed.
+  unlocked?: boolean
+  // Had a damaged page structure that was rebuilt so the file can be merged.
+  repaired?: boolean
+  error?: string
 }
 
 export interface CompareDocLike {

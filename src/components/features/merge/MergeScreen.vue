@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import UiButton from '@/components/ui/UiButton.vue'
 import MergeItem from '@/components/features/merge/MergeItem.vue'
@@ -9,12 +9,26 @@ import {
   moveMergeItem,
   performMerge,
   pickAndAppendFiles,
+  removeFailedMergeFiles,
+  removeMergeFile,
 } from '@/composables/useMerge'
 
 const router = useRouter()
 const pdf = usePdfStore()
 const dragover = ref(false)
 let dragSrc: number | null = null
+
+const failedCount = computed(() => pdf.mergeFiles.filter((f) => f.status === 'error').length)
+const checking = computed(() => pdf.mergeFiles.some((f) => f.status === 'checking'))
+const totalPages = computed(() =>
+  pdf.mergeFiles.reduce((n, f) => n + (f.status === 'ready' ? (f.pageCount ?? 0) : 0), 0),
+)
+const mergeBlockedReason = computed(() => {
+  if (pdf.mergeFiles.length < 2) return 'Add at least two PDFs'
+  if (checking.value) return 'Checking files…'
+  if (failedCount.value > 0) return "Remove the files that can't be merged first"
+  return null
+})
 
 async function onDrop(e: DragEvent) {
   e.preventDefault()
@@ -91,9 +105,6 @@ function onItemDrop(e: DragEvent, idx: number) {
   moveMergeItem(dragSrc, dest)
 }
 
-function removeAt(i: number) {
-  pdf.mergeFiles.splice(i, 1)
-}
 </script>
 
 <template>
@@ -125,7 +136,12 @@ function removeAt(i: number) {
       >
         Merge PDFs
       </h2>
-      <UiButton variant="primary" :disabled="pdf.mergeFiles.length < 2" @click="performMerge">
+      <UiButton
+        variant="primary"
+        :disabled="mergeBlockedReason !== null"
+        :title="mergeBlockedReason ?? undefined"
+        @click="performMerge"
+      >
         <svg
           viewBox="0 0 24 24"
           width="14"
@@ -138,9 +154,23 @@ function removeAt(i: number) {
         >
           <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
         </svg>
-        Merge & Save
+        {{ checking ? 'Checking files…' : 'Merge & Save' }}
       </UiButton>
     </header>
+
+    <div
+      v-if="failedCount > 0"
+      class="flex items-center gap-3 rounded-[10px] border border-rose-500/50 bg-rose-500/10 px-4 py-2.5 text-[13px] text-rose-200"
+      role="alert"
+    >
+      <span class="flex-1">
+        {{ failedCount === 1 ? '1 file can’t be merged' : `${failedCount} files can’t be merged` }} — the reason is
+        shown under {{ failedCount === 1 ? 'its name' : 'each name' }}.
+      </span>
+      <UiButton size="sm" @click="removeFailedMergeFiles">
+        {{ failedCount === 1 ? 'Remove it' : 'Remove them' }}
+      </UiButton>
+    </div>
 
     <div
       class="merge-body glass relative flex flex-1 flex-col gap-3 overflow-hidden rounded-[14px] p-5 transition-colors"
@@ -153,11 +183,15 @@ function removeAt(i: number) {
       <div class="flex flex-1 flex-col gap-2 overflow-y-auto">
         <MergeItem
           v-for="(f, i) in pdf.mergeFiles"
-          :key="`${f.name}-${i}`"
-          :idx="i"
+          :key="f.id"
           :name="f.name"
           :byte-length="f.bytes.byteLength"
-          @remove="removeAt(i)"
+          :status="f.status"
+          :page-count="f.pageCount"
+          :unlocked="f.unlocked"
+          :repaired="f.repaired"
+          :error="f.error"
+          @remove="removeMergeFile(f.id)"
           @dragstart="onItemDragStart($event, i)"
           @dragend="onItemDragEnd"
           @dragover="onItemDragOver"
@@ -189,22 +223,28 @@ function removeAt(i: number) {
         <p class="text-xs text-fg-mute">Drag to reorder. Click × to remove.</p>
       </div>
 
-      <UiButton class="self-start" @click="pickAndAppendFiles">
-        <svg
-          viewBox="0 0 24 24"
-          width="14"
-          height="14"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <line x1="12" y1="5" x2="12" y2="19" />
-          <line x1="5" y1="12" x2="19" y2="12" />
-        </svg>
-        Add PDF
-      </UiButton>
+      <div class="flex items-center gap-3">
+        <UiButton @click="pickAndAppendFiles">
+          <svg
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Add PDF
+        </UiButton>
+        <span v-if="pdf.mergeFiles.length > 0" class="text-xs text-fg-mute">
+          {{ pdf.mergeFiles.length }} {{ pdf.mergeFiles.length === 1 ? 'file' : 'files' }}
+          <template v-if="totalPages > 0">· {{ totalPages }} {{ totalPages === 1 ? 'page' : 'pages' }}</template>
+        </span>
+      </div>
     </div>
   </section>
 </template>

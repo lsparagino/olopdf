@@ -4,6 +4,7 @@
 import { usePdfStore, type Bookmark, type TextAnnotation } from '@/stores/pdf'
 import { hideLoading, showLoading } from '@/composables/useLoading'
 import { toast } from '@/composables/useToast'
+import { describeError } from '@/utils/errors'
 import { hexToRgb01, pickStandardFont } from '@/utils/pdf'
 import { fileExists, ipcInvoke, nodePath, writeFileBytes } from '@/utils/electron'
 import { loadPdfDocument } from '@/utils/pdfEncryption'
@@ -39,7 +40,7 @@ export async function savePdf(): Promise<void> {
     if (r.canceled || !r.filePath) return
 
     showLoading('Saving PDF...')
-    const srcDoc = await loadPdfDocument(pdf.pdfBytes)
+    const { doc: srcDoc } = await loadPdfDocument(pdf.pdfBytes)
     const newDoc = await PDFDocument.create()
 
     type StandardFontName = ReturnType<typeof pickStandardFont>
@@ -53,12 +54,20 @@ export async function savePdf(): Promise<void> {
       return f
     }
 
-    const copied = await newDoc.copyPages(srcDoc, pdf.pageOrder)
+    // pageOrder counts the pages pdf.js showed. In a damaged file pdf.js
+    // renders placeholders for pages pdf-lib can't reach, and copying one of
+    // those indices would throw and lose the whole save.
+    const pageOrder = pdf.pageOrder.filter((idx) => idx < srcDoc.getPageCount())
+    const dropped = pdf.pageOrder.length - pageOrder.length
+    if (dropped > 0) {
+      toast(`${dropped} damaged ${dropped === 1 ? 'page' : 'pages'} couldn't be saved`, 'warn')
+    }
+    const copied = await newDoc.copyPages(srcDoc, pageOrder)
     const origToNewIdx = new Map<number, number>()
     copied.forEach((p, i) => {
       newDoc.addPage(p)
-      origToNewIdx.set(pdf.pageOrder[i], i)
-      const rot = pdf.rotationFor(pdf.pageOrder[i])
+      origToNewIdx.set(pageOrder[i], i)
+      const rot = pdf.rotationFor(pageOrder[i])
       if (rot !== 0) p.setRotation(degrees(rot))
     })
 
@@ -102,8 +111,8 @@ export async function savePdf(): Promise<void> {
   } catch (err) {
     console.error(err)
     hideLoading()
-    const msg = err instanceof Error ? err.message : String(err)
-    toast(`Save failed: ${msg}`, 'error')
+    const msg = describeError(err)
+    toast(`Save failed: ${msg}`, 'error', { sticky: true })
   }
 }
 

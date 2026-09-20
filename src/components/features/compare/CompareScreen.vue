@@ -5,6 +5,7 @@ import UiButton from '@/components/ui/UiButton.vue'
 import { PDF_CONFIG, usePdfStore } from '@/stores/pdf'
 import { showLoading, hideLoading } from '@/composables/useLoading'
 import { toast } from '@/composables/useToast'
+import { describeError } from '@/utils/errors'
 import { ipcInvoke, nodePath, readFileAsArrayBuffer } from '@/utils/electron'
 import { usePdfjs } from '@/composables/usePdfEngine'
 import {
@@ -420,8 +421,8 @@ async function loadPdfForSide(side: 'left' | 'right', filePath: string): Promise
     await renderSidePreview(side)
   } catch (err) {
     console.error(err)
-    const msg = err instanceof Error ? err.message : String(err)
-    toast(`Failed to load PDF: ${msg}`, 'error')
+    const msg = describeError(err)
+    toast(`Failed to load PDF: ${msg}`, 'error', { sticky: true })
   } finally {
     hideLoading()
   }
@@ -546,8 +547,8 @@ async function runCompare(): Promise<void> {
     await gotoComparePage(firstChanged >= 0 ? firstChanged : 0)
   } catch (err) {
     console.error(err)
-    const msg = err instanceof Error ? err.message : String(err)
-    toast(`Compare failed: ${msg}`, 'error')
+    const msg = describeError(err)
+    toast(`Compare failed: ${msg}`, 'error', { sticky: true })
   } finally {
     hideLoading()
   }

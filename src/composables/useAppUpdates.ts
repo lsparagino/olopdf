@@ -31,7 +31,9 @@ export function useAppUpdates() {
     toast(`Downloading OloPDF ${payload.version}…`, '')
   }
   const onDownloaded = (_e: IpcRendererEvent, payload: DownloadedPayload) => {
-    toast(`OloPDF ${payload.version} ready — relaunch to install`, 'success')
+    // Sticky: until the user relaunches they're still running the old version,
+    // and a fix they were told about "not working" is easy to misread.
+    toast(`OloPDF ${payload.version} ready — relaunch to install`, 'success', { sticky: true })
   }
   const onError = (_e: IpcRendererEvent, payload: ErrorPayload) => {
     // Silent in production-noise terms — log only. A failed update check

@@ -345,7 +345,7 @@ async function imageRecompress(
   preset: PresetSettings,
   onProgress: (p: CompressProgress) => void,
 ): Promise<{ bytes: Uint8Array; metadataStripped: boolean } & ImageRecompressStats> {
-  const doc = await loadPdfDocument(srcBytes.slice(0))
+  const { doc } = await loadPdfDocument(srcBytes.slice(0))
   const ctx = doc.context
 
   // Find every DCTDecode-filtered image XObject. JBIG2 / JPEG2000 / Flate
